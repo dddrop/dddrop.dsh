@@ -1,0 +1,5 @@
+# Custom patch layer for the DeepSeek Harness Web profile.
+#
+# Keep this file as a top-level array of Cordis loader patch entries. Add
+# id-targeted configuration overrides, disabled flags, or inserted plugin rows.
+[]
