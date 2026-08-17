@@ -25,5 +25,8 @@ test('ships a DSH client module bundle', async () => {
   assert.match(bundle, /exports\.apply = plugin\.apply/)
   assert.match(bundle, /expectedRevision/)
   assert.match(bundle, /Git-backed · auto-sync on/)
+  assert.match(bundle, /optimisticSnapshot/)
+  assert.match(bundle, /ddk-snackbar/)
+  assert.match(bundle, /Move not saved/)
   assert.doesNotMatch(bundle, /[\p{Script=Han}]/u)
 })

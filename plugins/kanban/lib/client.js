@@ -41,7 +41,16 @@ window.__ModuleLoader__.load({
     '.ddk-edit-form{display:grid;gap:7px}',
     '.ddk-edit-actions{display:flex;justify-content:flex-end;gap:6px}',
     '.ddk-edit-actions .ddk-button{min-height:28px;padding:3px 8px;font-size:12px}',
-    '@media(max-width:720px){.ddk-root{padding:12px}.ddk-form{grid-template-columns:1fr auto}.ddk-select{grid-row:2}.ddk-button{grid-row:2}.ddk-column{flex-basis:82vw}}',
+    '.ddk-snackbar{position:fixed;right:22px;bottom:22px;z-index:1000;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:10px;width:min(380px,calc(100vw - 32px));box-sizing:border-box;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(30,30,32,.96);box-shadow:0 14px 38px rgba(0,0,0,.28);padding:12px 13px;color:#fff;animation:ddk-snackbar-in .18s ease-out}',
+    '.ddk-snackbar-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#d85c5c;color:#fff;font-size:12px;font-weight:750}',
+    '.ddk-snackbar-copy{display:grid;gap:2px;min-width:0}',
+    '.ddk-snackbar-title{font-size:13px;font-weight:650;line-height:1.35}',
+    '.ddk-snackbar-message{font-size:12px;line-height:1.45;color:rgba(255,255,255,.7)}',
+    '.ddk-snackbar-close{border:0;background:transparent;color:#fff;cursor:pointer;font-size:17px;line-height:1;opacity:.55;padding:1px 2px}',
+    '.ddk-snackbar-close:hover{opacity:1}',
+    '@keyframes ddk-snackbar-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}',
+    '@media(prefers-reduced-motion:reduce){.ddk-snackbar{animation:none}}',
+    '@media(max-width:720px){.ddk-root{padding:12px}.ddk-form{grid-template-columns:1fr auto}.ddk-select{grid-row:2}.ddk-button{grid-row:2}.ddk-column{flex-basis:82vw}.ddk-snackbar{right:16px;bottom:16px}}',
   ].join('\n')
 
   async function request(method, args) {
@@ -68,6 +77,7 @@ window.__ModuleLoader__.load({
     const [draggedCardId, setDraggedCardId] = React.useState('')
     const [editingCardId, setEditingCardId] = React.useState('')
     const [editingTitle, setEditingTitle] = React.useState('')
+    const [snackbar, setSnackbar] = React.useState(null)
     const requestSequence = React.useRef(0)
     const busyRef = React.useRef(false)
     const pollInFlight = React.useRef(false)
@@ -148,6 +158,24 @@ window.__ModuleLoader__.load({
       }
     }, [snapshot, targetColumn])
 
+    React.useEffect(() => {
+      if (!snackbar) return undefined
+      const timer = setTimeout(() => setSnackbar(null), 6_000)
+      return () => clearTimeout(timer)
+    }, [snackbar])
+
+    function friendlyMoveError(nextError) {
+      const message =
+        nextError instanceof Error ? nextError.message : String(nextError)
+      if (/changed since it was loaded|stale|cannot move/iu.test(message)) {
+        return 'The board changed elsewhere. The card was restored while the latest board reloads.'
+      }
+      if (/git|repository|push|pull|sync/iu.test(message)) {
+        return 'The move could not be synced to Git. The card was restored; please try again.'
+      }
+      return 'The move could not be saved. The card was restored; please try again.'
+    }
+
     async function run(action) {
       if (busyRef.current) return false
       busyRef.current = true
@@ -187,10 +215,46 @@ window.__ModuleLoader__.load({
     }
 
     function moveCard(cardId, columnId) {
-      if (!snapshot) return
-      void run(() =>
-        request('move', mutationArgs({ cardId, columnId })),
-      )
+      if (!snapshot || busyRef.current) return
+      const card = snapshot.board.cards.find((candidate) => candidate.id === cardId)
+      if (!card || card.columnId === columnId) return
+
+      const previousSnapshot = snapshot
+      const optimisticSnapshot = {
+        ...previousSnapshot,
+        board: {
+          ...previousSnapshot.board,
+          cards: previousSnapshot.board.cards.map((candidate) =>
+            candidate.id === cardId
+              ? { ...candidate, columnId }
+              : candidate,
+          ),
+        },
+      }
+      const expectedRevision = previousSnapshot.revision
+      busyRef.current = true
+      setBusy(true)
+      setError(null)
+      setSnapshot(optimisticSnapshot)
+      const sequence = ++requestSequence.current
+
+      void request('move', { cardId, columnId, expectedRevision })
+        .then((next) => {
+          if (sequence === requestSequence.current) applySnapshot(next)
+        })
+        .catch((nextError) => {
+          if (sequence !== requestSequence.current) return
+          setSnapshot(previousSnapshot)
+          setSnackbar({
+            title: 'Move not saved',
+            message: friendlyMoveError(nextError),
+          })
+        })
+        .finally(() => {
+          busyRef.current = false
+          setBusy(false)
+          if (sequence === requestSequence.current) void load(true)
+        })
     }
 
     function removeCard(cardId) {
@@ -448,6 +512,42 @@ window.__ModuleLoader__.load({
         ),
       ),
       React.createElement('div', { className: 'ddk-board' }, columns),
+      snackbar
+        ? React.createElement(
+            'div',
+            {
+              className: 'ddk-snackbar',
+              role: 'alert',
+              'aria-live': 'assertive',
+            },
+            React.createElement('span', { className: 'ddk-snackbar-icon' }, '!'),
+            React.createElement(
+              'div',
+              { className: 'ddk-snackbar-copy' },
+              React.createElement(
+                'strong',
+                { className: 'ddk-snackbar-title' },
+                snackbar.title,
+              ),
+              React.createElement(
+                'span',
+                { className: 'ddk-snackbar-message' },
+                snackbar.message,
+              ),
+            ),
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'ddk-snackbar-close',
+                title: 'Dismiss',
+                'aria-label': 'Dismiss notification',
+                onClick: () => setSnackbar(null),
+              },
+              '×',
+            ),
+          )
+        : null,
     )
   }
 

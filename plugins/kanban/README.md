@@ -11,6 +11,7 @@ A Git-backed, automatically synchronized Kanban board for the DeepSeek Harness W
 - Creates one semantic Git commit for every card addition, title edit, move, or deletion.
 - Renders the local committed board immediately, then synchronizes Git in the background so network latency does not block the loading state.
 - Polls for updates so separate browser tabs and sessions converge automatically.
+- Moves cards optimistically in the UI, then rolls them back and shows an accessible Snackbar if Git synchronization fails.
 - Enforces configured card-movement rules on both the client and Host.
 
 The previous workspace-scoped domain data and legacy workspace `kanban.json` files are intentionally ignored.
