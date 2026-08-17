@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
 
-import { addCard } from '../src/board.js'
+import { addCard, createDefaultBoard } from '../src/board.js'
 import {
   GitBoardRepository,
   RepositoryError,
@@ -58,10 +66,22 @@ test('pulls remote changes, rejects stale revisions, and pushes mutations', asyn
     await git(peer, 'config', 'user.email', 'peer@example.test')
     const peerBoardPath = path.join(peer, 'kanban', 'board.json')
     const peerBoard = JSON.parse(await readFile(peerBoardPath, 'utf8'))
-    peerBoard.cards[0].title = 'Changed in another clone'
-    peerBoard.cards[0].updatedAt = '2026-02-01T00:00:00.000Z'
-    await writeFile(peerBoardPath, `${JSON.stringify(peerBoard, null, 2)}\n`)
-    await git(peer, 'add', '--', 'kanban/board.json')
+    const peerTicketPath = path.join(
+      peer,
+      'kanban',
+      'tickets',
+      `${peerBoard.tickets[0].id}.json`,
+    )
+    const peerTicket = JSON.parse(await readFile(peerTicketPath, 'utf8'))
+    peerTicket.title = 'Changed in another clone'
+    peerTicket.updatedAt = '2026-02-01T00:00:00.000Z'
+    await writeFile(peerTicketPath, `${JSON.stringify(peerTicket, null, 2)}\n`)
+    await git(
+      peer,
+      'add',
+      '--',
+      `kanban/tickets/${peerBoard.tickets[0].id}.json`,
+    )
     await git(peer, 'commit', '-m', 'feat(kanban): update card remotely')
     await git(peer, 'push', 'origin', 'HEAD:main')
 
@@ -202,6 +222,126 @@ test('returns the local board before background Git synchronization completes', 
     releaseSync()
     await repository.backgroundSync
     assert.equal(repository.backgroundSync, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('rejects symlinked ancestors in a nested data directory', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-kanban-symlink-'))
+  const repositoryPath = path.join(root, 'repository')
+  const outsidePath = path.join(root, 'outside')
+
+  try {
+    await mkdir(repositoryPath)
+    await mkdir(outsidePath)
+    await symlink(outsidePath, path.join(repositoryPath, 'state'))
+    const repository = new GitBoardRepository({
+      repositoryPath,
+      dataDirectory: 'state/kanban',
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    })
+
+    await assert.rejects(
+      repository.overview(),
+      /data directories must be regular directories/,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('rejects invalid placement order and orphan ticket files', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-kanban-invalid-split-'))
+
+  try {
+    const repository = new GitBoardRepository({
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    })
+    await repository.overview()
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const boardSource = await readFile(boardPath, 'utf8')
+    const boardDocument = JSON.parse(boardSource)
+    boardDocument.tickets[0].order = 2
+    await writeFile(boardPath, `${JSON.stringify(boardDocument, null, 2)}\n`)
+    await assert.rejects(repository.overview(), /order must be unique and contiguous/)
+
+    await writeFile(boardPath, boardSource)
+    await writeFile(
+      path.join(root, 'kanban', 'tickets', 'orphan.json'),
+      `${JSON.stringify({
+        version: 1,
+        id: 'orphan',
+        title: 'Orphan ticket',
+        createdAt: '2026-02-05T00:00:00.000Z',
+        updatedAt: '2026-02-05T00:00:00.000Z',
+      }, null, 2)}\n`,
+    )
+    await assert.rejects(repository.overview(), /Unexpected ticket file/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('migrates a legacy combined board into split ticket files once', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-kanban-migration-'))
+
+  try {
+    await execFileAsync('git', ['init', '--initial-branch=main', root])
+    await git(root, 'config', 'user.name', 'Legacy Writer')
+    await git(root, 'config', 'user.email', 'legacy@example.test')
+    await mkdir(path.join(root, 'kanban'))
+    const legacyTicketId = 'legacy ticket/测试'
+    const legacyTicketFile = `b64--${Buffer.from(legacyTicketId, 'utf8').toString('base64url')}.json`
+    const legacyBoard = createDefaultBoard({
+      id: legacyTicketId,
+      now: '2026-02-05T00:00:00.000Z',
+    })
+    await writeFile(
+      path.join(root, 'kanban', 'board.json'),
+      `${JSON.stringify(legacyBoard, null, 2)}\n`,
+    )
+    await git(root, 'add', '--', 'kanban/board.json')
+    await git(root, 'commit', '-m', 'feat(kanban): add legacy board')
+
+    const repository = new GitBoardRepository({
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: false,
+    })
+    const migrated = await repository.overview()
+    assert.equal(migrated.format, 'split')
+    assert.equal(migrated.board.cards[0].id, legacyTicketId)
+
+    const boardDocument = JSON.parse(
+      await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
+    )
+    const ticketDocument = JSON.parse(
+      await readFile(
+        path.join(root, 'kanban', 'tickets', legacyTicketFile),
+        'utf8',
+      ),
+    )
+    assert.equal(boardDocument.version, 2)
+    assert.equal(boardDocument.cards, undefined)
+    assert.deepEqual(boardDocument.tickets, [
+      { id: legacyTicketId, columnId: 'backlog', order: 0 },
+    ])
+    assert.equal(ticketDocument.title, legacyBoard.cards[0].title)
+    assert.equal(
+      await git(root, 'log', '-1', '--format=%s'),
+      'refactor(kanban): split ticket storage',
+    )
+    assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
+
+    await repository.overview()
+    assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

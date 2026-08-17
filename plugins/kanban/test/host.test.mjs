@@ -163,7 +163,29 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.cards.length, 1)
+    assert.equal(board.version, 2)
+    assert.equal(board.cards, undefined)
+    assert.equal(board.tickets.length, 1)
+    const welcomeTicket = JSON.parse(
+      await readFile(
+        path.join(
+          root,
+          'kanban',
+          'tickets',
+          `${board.tickets[0].id}.json`,
+        ),
+        'utf8',
+      ),
+    )
+    assert.equal(welcomeTicket.id, board.tickets[0].id)
+    assert.equal(welcomeTicket.title, 'Move this card to Ready to try the board.')
+    await assert.rejects(
+      readFile(
+        path.join(root, 'kanban', 'tickets', `${addedCard.id}.json`),
+        'utf8',
+      ),
+      { code: 'ENOENT' },
+    )
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '5')
     assert.deepEqual(
       (await git(root, 'log', '--format=%s')).split('\n'),
@@ -175,6 +197,19 @@ test('serves one global Git-backed board and commits every mutation', async () =
         'feat(kanban): initialize board',
       ],
     )
+    const changedPaths = async (revision) =>
+      (await git(root, 'show', '--format=', '--name-only', revision))
+        .split('\n')
+        .filter(Boolean)
+        .sort()
+    assert.deepEqual(await changedPaths('HEAD~1'), ['kanban/board.json'])
+    assert.deepEqual(await changedPaths('HEAD~2'), [
+      `kanban/tickets/${addedCard.id}.json`,
+    ])
+    assert.deepEqual(await changedPaths('HEAD'), [
+      'kanban/board.json',
+      `kanban/tickets/${addedCard.id}.json`,
+    ])
     assert.equal(
       await readFile(path.join(siblingDirectory, 'state.json'), 'utf8'),
       '{"untouched":true}\n',

@@ -84,6 +84,10 @@ test('adds, edits, moves, and removes a card without mutating inputs', () => {
     moved.cards.find((card) => card.id === 'new-card').columnId,
     'in-progress',
   )
+  assert.equal(
+    moved.cards.find((card) => card.id === 'new-card').updatedAt,
+    '2026-01-02T00:00:00.000Z',
+  )
   assert.deepEqual(removed.cards.map((card) => card.id), ['new-card'])
 })
 

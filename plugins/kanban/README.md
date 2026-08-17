@@ -6,7 +6,7 @@ A Git-backed, automatically synchronized Kanban board for the DeepSeek Harness W
 
 - Adds a `Kanban` conversation tab.
 - Uses one global board shared by every DSH workspace and session.
-- Stores the board at `<repositoryPath>/<dataDirectory>/board.json`.
+- Stores workflow and ticket placement in `<repositoryPath>/<dataDirectory>/board.json` and each ticket body in `<repositoryPath>/<dataDirectory>/tickets/<ticket-id>.json`.
 - Pulls its configured Git remote with `--ff-only` and pushes explicit branch updates.
 - Creates one semantic Git commit for every card addition, title edit, move, or deletion.
 - Renders the local committed board immediately, then synchronizes Git in the background so network latency does not block the loading state.
@@ -15,6 +15,20 @@ A Git-backed, automatically synchronized Kanban board for the DeepSeek Harness W
 - Enforces configured card-movement rules on both the client and Host.
 
 The previous workspace-scoped domain data and legacy workspace `kanban.json` files are intentionally ignored.
+
+## Data layout
+
+```text
+<dataDirectory>/
+├── board.json
+└── tickets/
+    ├── <ticket-id>.json
+    └── ...
+```
+
+`board.json` uses storage version 2 and contains columns plus ordered ticket placements (`id`, `columnId`, and `order`). Ticket files use version 1 and contain the ticket identity, title, creation time, and content-update time. Filename-safe IDs are used directly; legacy IDs containing spaces, slashes, Unicode, or the reserved `b64--` prefix use a reversible base64url filename while retaining the original ID inside JSON. Moving a ticket changes only `board.json`; editing a title changes only that ticket file; adding or deleting a ticket changes both its file and the board placement index.
+
+If the Host finds the earlier combined `board.json` format with an embedded `cards` array, it creates and pushes one `refactor(kanban): split ticket storage` commit before serving the board. The migration preserves ticket IDs, titles, columns, and timestamps and runs only once.
 
 ## Architecture
 
@@ -69,7 +83,7 @@ Configure the plugin in the Web profile Cordis patch:
 
 Column IDs are stable persisted identifiers. Renaming a column title is safe. Removing or changing an ID requires migrating every card that references it before the plugin can read the board.
 
-The configured repository is a full code-execution trust boundary: repository and system Git configuration, credential helpers, transports, and content filters may execute programs. The plugin additionally disables Git hooks for commands it invokes, stages only the board file, and refuses to commit while the Git index or board path contains unrelated pending state.
+The configured repository is a full code-execution trust boundary: repository and system Git configuration, credential helpers, transports, and content filters may execute programs. The plugin additionally disables Git hooks for commands it invokes, stages only the managed board and ticket paths, and refuses to commit while the Git index or Kanban data paths contain unrelated pending state.
 
 ## Git synchronization
 
@@ -82,7 +96,7 @@ The synchronization sequence for a mutation is:
 3. Read the latest board and verify the client's expected revision.
 4. Apply and validate the mutation.
 5. Create a detached temporary Git worktree from the current `HEAD`.
-6. Atomically write, stage, and commit the board only inside that worktree.
+6. Atomically write, stage, and commit only the affected board and ticket files inside that worktree.
 7. Push the detached commit explicitly to the configured remote branch.
 8. Fast-forward the primary local checkout only after the push succeeds.
 9. Remove and prune the temporary worktree.
@@ -108,5 +122,5 @@ Restart DSH Web after Host plugin or profile configuration changes. The running 
 - It permits loopback and deployment-configured trusted Host values, rejects cross-site fetches, and requires Origin to match Host when present.
 - Every mutation is validated against the latest repository revision and configured workflow.
 - Git is invoked without a shell, with fixed argument arrays, bounded output, a timeout, and disabled hooks.
-- The configured repository root, data directory, and board file must not be symlinks.
+- The configured repository root, data directory, board file, tickets directory, and referenced ticket files must not be symlinks.
 - Git errors returned to the browser do not include command stderr, remote URLs, or credentials.

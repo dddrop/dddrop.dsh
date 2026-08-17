@@ -306,7 +306,6 @@ export function moveCard(boardInput, input, { workflow } = {}) {
   }
 
   card.columnId = columnId
-  card.updatedAt = normalizeTimestamp(input?.updatedAt, new Date().toISOString())
   return board
 }
 
