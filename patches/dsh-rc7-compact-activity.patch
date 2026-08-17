@@ -1,0 +1,953 @@
+diff --git a/packages/client/ui-conversation/src/client/apply.ts b/packages/client/ui-conversation/src/client/apply.ts
+index f57caea9e5..a76c04c8a3 100644
+--- a/packages/client/ui-conversation/src/client/apply.ts
++++ b/packages/client/ui-conversation/src/client/apply.ts
+@@ -381,6 +381,8 @@ export function apply(ctx: Context): void {
+     locale: NS,
+     children: {
+       'conversation.chat.node': { kind: 'keyed', scope: 'session', inject: CHAT_NODE_INJECT },
++      'conversation.chat.activity.reasoningDetail': { kind: 'single', scope: 'session' },
++      'conversation.chat.activity.toolDetail': { kind: 'single', scope: 'session' },
+     },
+     store: chatStore,
+     inject: (sessionId: SessionId, actions: BoundActions<typeof chatStore>): ChatViewInjected => {
+diff --git a/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css b/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css
+new file mode 100644
+index 0000000000..dea6467e45
+--- /dev/null
++++ b/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css
+@@ -0,0 +1,160 @@
++.root {
++  min-width: 0;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++
++.strip {
++  min-width: 0;
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  overflow-x: auto;
++  padding: 1px;
++  scrollbar-width: thin;
++}
++
++.chip {
++  position: relative;
++  width: 30px;
++  height: 30px;
++  flex: 0 0 30px;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  padding: 0;
++  border: 1px solid var(--dsw-alias-border-l1);
++  border-radius: 6px;
++  color: var(--dsw-alias-label-secondary);
++  background: var(--dsw-alias-bg-layer-1);
++  cursor: pointer;
++  transition: border-color 160ms var(--ds-ease-in-out), color 160ms var(--ds-ease-in-out), background 160ms var(--ds-ease-in-out);
++}
++
++.chip:hover {
++  border-color: var(--dsw-alias-border-l2);
++  color: var(--dsw-alias-label-primary);
++  background: var(--dsw-alias-bg-layer-2);
++}
++
++.chip[aria-expanded='true'] {
++  border-color: var(--dsw-alias-brand-primary);
++  color: var(--dsw-alias-brand-primary);
++  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, var(--dsw-alias-bg-layer-1));
++}
++
++.chip:focus-visible {
++  outline: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 68%, transparent);
++  outline-offset: 2px;
++}
++
++.status {
++  position: absolute;
++  top: 3px;
++  right: 3px;
++  width: 5px;
++  height: 5px;
++  border-radius: 50%;
++  background: var(--dsw-alias-state-success-primary);
++}
++
++.status[data-state='running'] {
++  background: var(--dsw-alias-brand-primary);
++  animation: activity-pulse 1.4s ease-in-out infinite;
++}
++
++.status[data-state='error'] {
++  background: var(--dsw-alias-state-error-primary);
++}
++
++.detail {
++  min-width: 0;
++  max-height: 320px;
++  overflow: auto;
++  border: 1px solid var(--dsw-alias-border-l1);
++  border-radius: 8px;
++  padding: 10px 12px;
++  background: var(--dsw-alias-bg-layer-1);
++  box-shadow: var(--dsw-shadow-lv1-blur);
++}
++
++.detailHeader {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 12px;
++  margin-bottom: 8px;
++  color: var(--dsw-alias-label-primary);
++  font: var(--dsw-font-s-strong-14);
++}
++
++.detailActions {
++  display: inline-flex;
++  align-items: center;
++  gap: 8px;
++}
++
++.detailMeta {
++  color: var(--dsw-alias-label-tertiary);
++  font: var(--dsw-font-xs-13);
++}
++
++.detailAction {
++  width: 24px;
++  height: 24px;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  border: 0;
++  color: var(--dsw-alias-label-secondary);
++  background: transparent;
++  cursor: pointer;
++}
++
++.detailAction:hover {
++  color: var(--dsw-alias-brand-primary);
++  background: var(--dsw-alias-bg-layer-2);
++}
++
++.inputLabel {
++  margin: 10px 0 4px;
++  color: var(--dsw-alias-label-tertiary);
++  font: var(--dsw-font-xxs-strong-12);
++  letter-spacing: 0.04em;
++  text-transform: uppercase;
++}
++
++.code,
++.reasoning {
++  margin: 0;
++  overflow-wrap: anywhere;
++  color: var(--dsw-alias-label-secondary);
++  font: var(--dsw-font-s-14);
++}
++
++.code {
++  white-space: pre-wrap;
++  font-family: var(--ds-font-family-code);
++  font-size: 12px;
++  line-height: 18px;
++}
++
++.initials {
++  font-family: var(--ds-font-family-code);
++  font-size: 9px;
++  font-weight: 700;
++  letter-spacing: -0.04em;
++  text-transform: uppercase;
++}
++
++@keyframes activity-pulse {
++  0%, 100% { opacity: 0.45; }
++  50% { opacity: 1; }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .status[data-state='running'] {
++    animation: none;
++  }
++}
+diff --git a/packages/client/ui-conversation/src/client/chat/ActivityCluster.tsx b/packages/client/ui-conversation/src/client/chat/ActivityCluster.tsx
+new file mode 100644
+index 0000000000..8d2ef579de
+--- /dev/null
++++ b/packages/client/ui-conversation/src/client/chat/ActivityCluster.tsx
+@@ -0,0 +1,256 @@
++import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
++import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
++import {
++  IconBrowseOutline16, IconChecklistOutline14, IconCodeOutline16,
++  IconCordisPluginOutline14, IconDataOutline16, IconEditOutline16,
++  IconGlobeOutline14, IconInspectOutline12, IconQuestionOutline14, IconSearchOutline16,
++  IconSkillOutline16, IconThinkOutline16, MarkdownText,
++} from '@deepseek-ai/dsh-client-ui-primitives'
++import type { ChatViewSlotProps } from '../contract/slots.ts'
++import type { ChatNode } from '../contract/chat-nodes.ts'
++import css from './ActivityCluster.module.css'
++
++type ActivityState = 'running' | 'ok' | 'error'
++
++interface ReasoningActivity {
++  kind: 'reasoning'
++  id: string
++  label: string
++  text: string
++  running: boolean
++  state: ActivityState
++}
++
++interface ToolActivity {
++  kind: 'tool'
++  id: string
++  label: string
++  callId: string
++  toolName: string
++  block: ToolCallBlock
++  argsRaw: string
++  state: ActivityState
++}
++
++type ActivityItem = ReasoningActivity | ToolActivity
++
++interface ActivityClusterProps {
++  nodeKeys: readonly string[]
++  useSession: ChatViewSlotProps['useSession']
++  renderSlot: ChatViewSlotProps['renderSlot']
++  cwd?: string | undefined
++  openFile: ChatViewSlotProps['openFile']
++  inspectCall: ChatViewSlotProps['inspectCall']
++  t: ChatViewSlotProps['t']
++}
++
++function sameNodeRefs(left: readonly (ChatNode | undefined)[], right: readonly (ChatNode | undefined)[]): boolean {
++  return left.length === right.length && left.every((node, index) => node === right[index])
++}
++
++function callName(block: ToolCallBlock): string {
++  if ('kind' in block) return block.call?.name ?? block.callId
++  return block.name
++}
++
++function callArgs(block: ToolCallBlock): string {
++  if ('kind' in block) return block.call?.argsRaw ?? ''
++  return block.argsRaw
++}
++
++function callState(block: ToolCallBlock): ActivityState {
++  if (!('kind' in block)) return 'running'
++  return block.isError ? 'error' : 'ok'
++}
++
++function appendTool(items: ActivityItem[], nodeKey: string, block: ToolCallBlock): void {
++  const toolName = callName(block)
++  items.push({
++    kind: 'tool',
++    id: `${nodeKey}:tool:${block.callId}`,
++    label: toolName,
++    callId: block.callId,
++    toolName,
++    block,
++    argsRaw: callArgs(block),
++    state: callState(block),
++  })
++  for (const child of block.subCalls) appendTool(items, nodeKey, child)
++}
++
++function collectActivities(nodes: readonly (ChatNode | undefined)[]): readonly ActivityItem[] {
++  const items: ActivityItem[] = []
++  for (const node of nodes) {
++    if (node?.kind === 'assistant-step') {
++      const last = node.data.blocks.length - 1
++      node.data.blocks.forEach((block, index) => {
++        if (block.kind !== 'reasoning') return
++        const running = node.data.status === 'running' && index === last
++        items.push({
++          kind: 'reasoning',
++          id: `${node.key}:reasoning:${index}`,
++          label: 'Think',
++          text: block.text,
++          running,
++          state: running ? 'running' : 'ok',
++        })
++      })
++      continue
++    }
++    if (node?.kind === 'tool-call') appendTool(items, node.key, node.data.root)
++  }
++  return items
++}
++
++function toolGlyph(name: string): ReactNode {
++  if (name === 'grep' || name === 'glob' || name.includes('search')) return <IconSearchOutline16 size={15} />
++  if (name === 'read') return <IconBrowseOutline16 size={15} />
++  if (name === 'edit' || name === 'write') return <IconEditOutline16 size={15} />
++  if (name === 'bash' || name.includes('command')) return <IconCodeOutline16 size={15} />
++  if (name.startsWith('cordis_')) return <IconCordisPluginOutline14 size={15} />
++  if (name.startsWith('web_')) return <IconGlobeOutline14 size={15} />
++  if (name === 'todo_write') return <IconChecklistOutline14 size={15} />
++  if (name === 'skill') return <IconSkillOutline16 size={15} />
++  if (name === 'ask_user_question') return <IconQuestionOutline14 size={15} />
++  const initials = name.split(/[_-]/u).filter(Boolean).slice(0, 2).map(part => part[0]).join('')
++  return initials === '' ? <IconDataOutline16 size={15} /> : <span className={css.initials}>{initials}</span>
++}
++
++function flattenedResult(block: ToolCallBlock): string {
++  if (!('kind' in block)) return ''
++  const parts: string[] = []
++  for (const item of block.content) {
++    if (item.type === 'text') parts.push(item.text)
++  }
++  return parts.join('\n')
++}
++
++function ActivityIcon({ item, selected, panelId, onSelect }: {
++  item: ActivityItem
++  selected: boolean
++  panelId: string
++  onSelect: () => void
++}) {
++  return (
++    <button
++      type="button"
++      className={css.chip}
++      aria-label={item.label}
++      aria-expanded={selected}
++      aria-controls={panelId}
++      title={item.label}
++      data-activity-kind={item.kind}
++      data-activity-state={item.state}
++      data-chat-anchor-key={item.kind === 'tool' ? `call:${item.callId}` : undefined}
++      data-chat-call-id={item.kind === 'tool' ? item.callId : undefined}
++      onClick={onSelect}
++    >
++      {item.kind === 'reasoning' ? <IconThinkOutline16 size={15} /> : toolGlyph(item.toolName)}
++      <span className={css.status} data-state={item.state} aria-hidden />
++    </button>
++  )
++}
++
++function ToolFallback({ item, runningLabel }: { item: ToolActivity; runningLabel: string }) {
++  const output = flattenedResult(item.block)
++  if (item.state === 'running') return <div className={css.detailMeta}>{runningLabel}</div>
++  return <pre className={css.code}>{output}</pre>
++}
++
++/** Compact one Turn's reasoning and Tool activity into a horizontal icon strip. */
++export function ActivityCluster({
++  nodeKeys, useSession, renderSlot, cwd, openFile, inspectCall, t,
++}: ActivityClusterProps) {
++  const nodes = useSession(
++    snapshot => nodeKeys.map(key => snapshot.chat.nodes.get(key) as ChatNode | undefined),
++    sameNodeRefs,
++  )
++  const items = useMemo(() => collectActivities(nodes), [nodes])
++  const codeLabels = useMemo(() => ({ copyLabel: t('copy'), copiedLabel: t('copied') }), [t])
++  const [selectedId, setSelectedId] = useState<string | null>(null)
++  const panelId = useId()
++  const selected = items.find(item => item.id === selectedId) ?? null
++
++  useEffect(() => {
++    if (selectedId !== null && !items.some(item => item.id === selectedId)) setSelectedId(null)
++  }, [items, selectedId])
++
++  let detailBody: ReactNode = null
++  if (selected?.kind === 'reasoning') {
++    detailBody = renderSlot('conversation.chat.activity.reasoningDetail', {
++      text: selected.text,
++      running: selected.running,
++    }, {
++      fallback: (
++        <div className={css.reasoning}>
++          <MarkdownText text={selected.text} streaming={selected.running} codeLabels={codeLabels} />
++        </div>
++      ),
++    })
++  } else if (selected?.kind === 'tool') {
++    detailBody = (
++      <>
++        {selected.argsRaw !== '' ? (
++          <>
++            <div className={css.inputLabel}>{t('details.input')}</div>
++            <pre className={css.code}>{selected.argsRaw}</pre>
++            <div className={css.inputLabel}>{t('details.output')}</div>
++          </>
++        ) : null}
++        {renderSlot('conversation.chat.activity.toolDetail', {
++          callId: selected.callId,
++          toolName: selected.toolName,
++          block: selected.block,
++          cwd,
++          openFile,
++          inspect: () => { inspectCall(selected.callId) },
++        }, {
++          fallback: <ToolFallback item={selected} runningLabel={t('details.running')} />,
++        })}
++      </>
++    )
++  }
++
++  const statusLabel = selected?.state === 'running'
++    ? t('row.running')
++    : selected?.state === 'error' ? t('row.failed') : ''
++
++  if (items.length === 0) return null
++  return (
++    <div className={css.root} data-chat-activity-cluster="">
++      <div className={css.strip} role="toolbar" aria-label={t('activity.label')}>
++        {items.map(item => (
++          <ActivityIcon
++            key={item.id}
++            item={item}
++            selected={item.id === selectedId}
++            panelId={panelId}
++            onSelect={() => { setSelectedId(current => current === item.id ? null : item.id) }}
++          />
++        ))}
++      </div>
++      {selected !== null ? (
++        <section id={panelId} className={css.detail} aria-label={t('activity.details')}>
++          <div className={css.detailHeader}>
++            <span>{selected.label}</span>
++            <span className={css.detailActions}>
++              <span className={css.detailMeta}>{statusLabel}</span>
++              {selected.kind === 'tool' ? (
++                <button
++                  type="button"
++                  className={css.detailAction}
++                  aria-label={t('activity.inspect')}
++                  title={t('activity.inspect')}
++                  onClick={() => { inspectCall(selected.callId) }}
++                >
++                  <IconInspectOutline12 size={14} />
++                </button>
++              ) : null}
++            </span>
++          </div>
++          {detailBody}
++        </section>
++      ) : null}
++    </div>
++  )
++}
+diff --git a/packages/client/ui-conversation/src/client/chat/ChatView.tsx b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
+index 58e63b312f..25502a1ebf 100644
+--- a/packages/client/ui-conversation/src/client/chat/ChatView.tsx
++++ b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
+@@ -16,7 +16,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+ import type { ConversationTimelineSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
+ import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ChatViewSlotProps } from '../contract/slots.ts'
++import type { ChatNode } from '../contract/chat-nodes.ts'
+ import { PendingSteeringBubble } from './MessageItem.tsx'
++import { ActivityCluster } from './ActivityCluster.tsx'
++import { activityMembershipSignature, groupActivityOrder } from './activity-groups.ts'
+ import { ChatNodeSeat } from './ChatNodeSeat.tsx'
+ import { formatRunDuration } from './message-chrome.ts'
+ import css from './ChatView.module.css'
+@@ -159,6 +162,14 @@ export function ChatView({
+   const hasMore = useSession(s => s.hasMore)
+   const loadingOlder = useSession(s => s.loadingOlder)
+   const selectedCallId = useStore(s => s.selection?.callId)
++  const activitySignature = useSession(s => activityMembershipSignature(
++    s.chat.order,
++    key => s.chat.nodes.get(key) as ChatNode | undefined,
++  ))
++  const flowUnits = useMemo(
++    () => groupActivityOrder(order, key => nodeStore.get(key) as ChatNode | undefined),
++    [activitySignature, nodeStore, order],
++  )
+ 
+   const pendingSteering = useMemo(
+     () => inbox.filter(item => item.placement === 'steering'),
+@@ -362,6 +373,46 @@ export function ChatView({
+     loadOlder()
+   }
+ 
++  const flow = flowUnits.map((unit) => {
++    if (unit.kind === 'activity') {
++      return (
++        <div
++          key={unit.key}
++          className={css.flowItem}
++          data-chat-anchor-key={unit.nodeKeys[0]}
++          data-chat-flow-key={unit.key}
++          data-chat-flow-kind="activity"
++        >
++          <ActivityCluster
++            nodeKeys={unit.nodeKeys}
++            useSession={useSession}
++            renderSlot={renderSlot}
++            cwd={cwd}
++            openFile={openFile}
++            inspectCall={inspectCall}
++            t={t}
++          />
++        </div>
++      )
++    }
++    return (
++      <ChatNodeSeat
++        key={unit.key}
++        nodeKey={unit.nodeKey}
++        useSession={useSession}
++        selectedCallId={selectedCallId}
++        cwd={cwd}
++        openFile={openFile}
++        inspectCall={inspectCall}
++        forkAt={forkAt}
++        loadImage={loadImage}
++        fileMentions={fileMentions}
++        renderSlot={renderSlot}
++        t={t}
++      />
++    )
++  })
++
+   return (
+     <div className={css.root}>
+       <div ref={listRef} className={css.scroll}>
+@@ -379,22 +430,7 @@ export function ChatView({
+               </button>
+             </div>
+           )}
+-          {order.map(nodeKey => (
+-            <ChatNodeSeat
+-              key={nodeKey}
+-              nodeKey={nodeKey}
+-              useSession={useSession}
+-              selectedCallId={selectedCallId}
+-              cwd={cwd}
+-              openFile={openFile}
+-              inspectCall={inspectCall}
+-              forkAt={forkAt}
+-              loadImage={loadImage}
+-              fileMentions={fileMentions}
+-              renderSlot={renderSlot}
+-              t={t}
+-            />
+-          ))}
++          {flow}
+           {/* No pending placeholders: questions (ui-user-questions) and approvals
+               (ApprovalPanel) both take over the composer, so a flow card would
+               double-render the same wait. */}
+diff --git a/packages/client/ui-conversation/src/client/chat/activity-groups.ts b/packages/client/ui-conversation/src/client/chat/activity-groups.ts
+new file mode 100644
+index 0000000000..0d496f4462
+--- /dev/null
++++ b/packages/client/ui-conversation/src/client/chat/activity-groups.ts
+@@ -0,0 +1,79 @@
++import type { ChatNode } from '../contract/chat-nodes.ts'
++
++export interface ActivityGroupUnit {
++  kind: 'activity'
++  key: string
++  nodeKeys: readonly string[]
++  groupKey: string
++}
++
++export interface ChatNodeUnit {
++  kind: 'node'
++  key: string
++  nodeKey: string
++}
++
++export type ChatFlowUnit = ActivityGroupUnit | ChatNodeUnit
++
++type NodeLookup = (key: string) => ChatNode | undefined
++
++function isReasoningOnlyAssistant(node: ChatNode): boolean {
++  if (node.kind !== 'assistant-step') return false
++  let hasReasoning = false
++  for (const block of node.data.blocks) {
++    if (block.kind === 'reasoning') {
++      hasReasoning = true
++      continue
++    }
++    if (block.kind !== 'tool-call') return false
++  }
++  return hasReasoning
++}
++
++/** Return the owning Turn for nodes that the compact activity surface may claim. */
++export function activityGroupKey(node: ChatNode): string | null {
++  if (node.kind !== 'tool-call' && !isReasoningOnlyAssistant(node)) return null
++  if (node.location.kind !== 'step') return null
++  return `turn:${node.location.step.turn}`
++}
++
++/**
++ * Track only grouping-relevant node facts. Streaming text and Tool settlement
++ * do not rebuild the whole Chat list; a new activity member or changed block
++ * classification does.
++ */
++export function activityMembershipSignature(order: readonly string[], lookup: NodeLookup): string {
++  return order.map((key) => {
++    const node = lookup(key)
++    if (node === undefined) return `${key}:missing`
++    return `${key}:${activityGroupKey(node) ?? 'node'}`
++  }).join('|')
++}
++
++/** Group consecutive reasoning-only Assistant and Tool nodes in the same Turn. */
++export function groupActivityOrder(order: readonly string[], lookup: NodeLookup): readonly ChatFlowUnit[] {
++  const units: ChatFlowUnit[] = []
++  for (const nodeKey of order) {
++    const node = lookup(nodeKey)
++    const activityKey = node === undefined ? null : activityGroupKey(node)
++    if (activityKey === null) {
++      units.push({ kind: 'node', key: nodeKey, nodeKey })
++      continue
++    }
++    const previous = units.at(-1)
++    if (previous?.kind === 'activity' && previous.groupKey === activityKey) {
++      units[units.length - 1] = {
++        ...previous,
++        nodeKeys: [...previous.nodeKeys, nodeKey],
++      }
++      continue
++    }
++    units.push({
++      kind: 'activity',
++      key: `activity:${nodeKey}`,
++      nodeKeys: [nodeKey],
++      groupKey: activityKey,
++    })
++  }
++  return units
++}
+diff --git a/packages/client/ui-conversation/src/client/contract/slots.ts b/packages/client/ui-conversation/src/client/contract/slots.ts
+index 21259146a7..a91974c589 100644
+--- a/packages/client/ui-conversation/src/client/contract/slots.ts
++++ b/packages/client/ui-conversation/src/client/contract/slots.ts
+@@ -83,6 +83,18 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+       hookContext: string
+       inject: ChatNodeTurnDataInjected
+     }
++    /** Replace the inline detail body for one compact reasoning activity. */
++    'conversation.chat.activity.reasoningDetail': {
++      kind: 'single'
++      scope: 'session'
++      owner: ActivityReasoningDetailOwnerProps
++    }
++    /** Replace the inline detail body for one compact Tool activity. */
++    'conversation.chat.activity.toolDetail': {
++      kind: 'single'
++      scope: 'session'
++      owner: ActivityToolDetailOwnerProps
++    }
+     /**
+      * The chat view's per-command row hole: keyed dispatch on the command
+      * name (`command/run.name`; a run-less cross-window node has none and
+@@ -370,6 +382,28 @@ export interface ChatNodeOwnerProps {
+ export type ChatNodeViewProps<Kind extends ChatNodeKind = ChatNodeKind> =
+   PropsRuntime<'conversation.chat.node', Kind> & PropsLocale<'conversation'>
+ 
++/** Owner currency of the compact reasoning detail surface. */
++export interface ActivityReasoningDetailOwnerProps {
++  text: string
++  running: boolean
++}
++
++/** Owner currency of the compact Tool detail surface. */
++export interface ActivityToolDetailOwnerProps {
++  callId: string
++  toolName: string
++  block: ToolCallBlock
++  cwd?: string | undefined
++  openFile: (path: string) => void
++  inspect?: (() => void) | undefined
++}
++
++export type ActivityReasoningDetailProps =
++  PropsRuntime<'conversation.chat.activity.reasoningDetail'> & PropsLocale<'conversation'>
++
++export type ActivityToolDetailProps =
++  PropsRuntime<'conversation.chat.activity.toolDetail'> & PropsLocale<'conversation'>
++
+ /** Owner currency of the details panel's Tool output renderer. */
+ export interface DetailsToolOwnerProps {
+   /** Frozen selected call slice. */
+@@ -707,9 +741,14 @@ export interface ChatViewInjected {
+   fileMentions: (owner: TurnTailOwnerProps) => MarkdownFileMentions | undefined
+ }
+ 
+-/** Full chat-view component props: runtime & its Tool/command/tail render shares & store & injected & locale seat. */
++/** Full chat-view component props: runtime, child render shares, store, injected actions, and locale. */
+ export type ChatViewSlotProps =
+-  PropsRuntime<'conversation.view'> & PropsRenderSlots<'conversation.chat.node'>
++  PropsRuntime<'conversation.view'>
++  & PropsRenderSlots<
++    | 'conversation.chat.node'
++    | 'conversation.chat.activity.reasoningDetail'
++    | 'conversation.chat.activity.toolDetail'
++  >
+   & PropsStore<ChatStore> & ChatViewInjected & PropsLocale<'conversation'>
+ 
+ /**
+diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
+index c9b6f658ca..46740ceda7 100644
+--- a/packages/client/ui-conversation/src/client/locales.ts
++++ b/packages/client/ui-conversation/src/client/locales.ts
+@@ -81,6 +81,9 @@ export const zh = {
+   'details.input': '输入',
+   'details.output': '输出',
+   'details.running': '运行中…',
++  'activity.label': '思维与工具活动',
++  'activity.details': '活动详情',
++  'activity.inspect': '在右侧详情中打开',
+   'todo.title': '任务',
+   'todo.progress.done': '{done} 已完成',
+   'todo.progress.active': '{active} 进行中',
+@@ -250,6 +253,9 @@ export const en = {
+   'details.input': 'Input',
+   'details.output': 'Output',
+   'details.running': 'Running…',
++  'activity.label': 'Reasoning and tool activity',
++  'activity.details': 'Activity details',
++  'activity.inspect': 'Open in side details',
+   'todo.title': 'To-dos',
+   'todo.progress.done': '{done} completed',
+   'todo.progress.active': '{active} in progress',
+diff --git a/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx b/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx
+new file mode 100644
+index 0000000000..5dbb7472d8
+--- /dev/null
++++ b/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx
+@@ -0,0 +1,96 @@
++// @vitest-environment jsdom
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { cleanup, fireEvent, render } from '@testing-library/react'
++import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
++import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
++import type { ChatNode } from '../src/client/contract/chat-nodes.ts'
++import type { ChatViewSlotProps } from '../src/client/contract/slots.ts'
++import { ActivityCluster } from '../src/client/chat/ActivityCluster.tsx'
++import { zh } from '../src/client/locales.ts'
++
++afterEach(cleanup)
++
++const t = makeTranslate(zh, commonZh)
++
++function nodes(): readonly ChatNode[] {
++  const location = {
++    kind: 'step' as const,
++    turn: { turn: 1 },
++    step: { turn: 1, step: 1 },
++  }
++  return [
++    {
++      key: 'assistant',
++      kind: 'assistant-step',
++      location,
++      data: {
++        status: 'settled',
++        turn: 1,
++        step: 1,
++        time: 1,
++        blocks: [{ kind: 'reasoning', text: 'Inspect the files' }],
++      },
++    },
++    {
++      key: 'tool',
++      kind: 'tool-call',
++      location,
++      data: {
++        root: {
++          kind: 'tool-result',
++          seq: 2,
++          time: 2,
++          callId: 'call-1',
++          call: { name: 'read', argsRaw: '{"file_path":"README.md"}' },
++          callTime: 1,
++          content: [{ type: 'text', text: 'file body' }],
++          isError: false,
++          callView: null,
++          resultView: null,
++          subCalls: [],
++        },
++      },
++    },
++  ] as unknown as readonly ChatNode[]
++}
++
++function props(inspectCall: (callId: string) => void = () => {}) {
++  const activityNodes = nodes()
++  const byKey = new Map(activityNodes.map(node => [node.key, node]))
++  const snapshot = { chat: { nodes: { get: (key: string) => byKey.get(key) } } }
++  const useSession = ((selector: (value: typeof snapshot) => unknown) => selector(snapshot)) as ChatViewSlotProps['useSession']
++  const renderSlot = ((key: string, owner: { text?: string; toolName?: string }) => key.endsWith('reasoningDetail')
++    ? <div>Reasoning detail: {owner.text}</div>
++    : <div>Tool detail: {owner.toolName}</div>) as ChatViewSlotProps['renderSlot']
++  return {
++    nodeKeys: ['assistant', 'tool'],
++    useSession,
++    renderSlot,
++    openFile: () => {},
++    inspectCall,
++    t,
++  }
++}
++
++describe('ActivityCluster', () => {
++  it('shows icons first, switches one inline panel, and preserves side inspection', () => {
++    const inspectCall = vi.fn()
++    const view = render(<ActivityCluster {...props(inspectCall)} />)
++    const think = view.getByRole('button', { name: 'Think' })
++    const read = view.getByRole('button', { name: 'read' })
++    expect(view.queryByLabelText('活动详情')).toBeNull()
++
++    fireEvent.click(think)
++    expect(view.getByText('Reasoning detail: Inspect the files')).toBeTruthy()
++    expect(think.getAttribute('aria-expanded')).toBe('true')
++
++    fireEvent.click(read)
++    expect(view.queryByText('Reasoning detail: Inspect the files')).toBeNull()
++    expect(view.getByText('Tool detail: read')).toBeTruthy()
++    expect(read.getAttribute('aria-expanded')).toBe('true')
++    expect(view.getAllByLabelText('活动详情')).toHaveLength(1)
++
++    fireEvent.click(view.getByRole('button', { name: '在右侧详情中打开' }))
++    expect(inspectCall).toHaveBeenCalledWith('call-1')
++  })
++})
+diff --git a/packages/client/ui-conversation/tests/activity-groups.client.spec.ts b/packages/client/ui-conversation/tests/activity-groups.client.spec.ts
+new file mode 100644
+index 0000000000..9b2a5ca822
+--- /dev/null
++++ b/packages/client/ui-conversation/tests/activity-groups.client.spec.ts
+@@ -0,0 +1,97 @@
++import { describe, expect, it } from 'vitest'
++import type { ChatNode } from '../src/client/contract/chat-nodes.ts'
++import { activityMembershipSignature, groupActivityOrder } from '../src/client/chat/activity-groups.ts'
++
++function stepLocation(turn: number, step: number) {
++  return {
++    kind: 'step' as const,
++    turn: { turn },
++    step: { turn, step },
++  }
++}
++
++function assistant(key: string, turn: number, step: number, kinds: readonly ('reasoning' | 'text' | 'tool-call')[]): ChatNode {
++  return {
++    key,
++    kind: 'assistant-step',
++    location: stepLocation(turn, step),
++    data: {
++      status: 'settled',
++      turn,
++      step,
++      time: 1,
++      blocks: kinds.map(kind => kind === 'reasoning'
++        ? { kind, text: 'reasoning' }
++        : kind === 'text'
++          ? { kind, text: 'answer' }
++          : { kind, callId: 'call-1', name: 'read', argsRaw: '{}' }),
++    },
++  } as unknown as ChatNode
++}
++
++function tool(key: string, turn: number, step: number): ChatNode {
++  return {
++    key,
++    kind: 'tool-call',
++    location: stepLocation(turn, step),
++    data: {
++      root: {
++        callId: key,
++        name: 'read',
++        argsRaw: '{}',
++        turn,
++        step,
++        time: 1,
++        callView: null,
++        subCalls: [],
++      },
++    },
++  } as unknown as ChatNode
++}
++
++function lookup(nodes: readonly ChatNode[]): (key: string) => ChatNode | undefined {
++  const byKey = new Map(nodes.map(node => [node.key, node]))
++  return key => byKey.get(key)
++}
++
++describe('compact activity grouping', () => {
++  it('groups consecutive reasoning-only Assistant and Tool nodes in one Turn', () => {
++    const nodes = [assistant('assistant', 1, 2, ['reasoning', 'tool-call']), tool('tool', 1, 2)]
++    expect(groupActivityOrder(nodes.map(node => node.key), lookup(nodes))).toEqual([{
++      kind: 'activity',
++      key: 'activity:assistant',
++      nodeKeys: ['assistant', 'tool'],
++      groupKey: 'turn:1',
++    }])
++  })
++
++  it('keeps visible Assistant prose on the ordinary renderer path', () => {
++    const nodes = [assistant('assistant', 1, 2, ['reasoning', 'text']), tool('tool', 1, 2)]
++    expect(groupActivityOrder(nodes.map(node => node.key), lookup(nodes))).toEqual([
++      { kind: 'node', key: 'assistant', nodeKey: 'assistant' },
++      { kind: 'activity', key: 'activity:tool', nodeKeys: ['tool'], groupKey: 'turn:1' },
++    ])
++  })
++
++  it('compacts consecutive activity across Step boundaries in one Turn', () => {
++    const nodes = [tool('first', 1, 1), tool('second', 1, 2)]
++    expect(groupActivityOrder(nodes.map(node => node.key), lookup(nodes))).toEqual([{
++      kind: 'activity',
++      key: 'activity:first',
++      nodeKeys: ['first', 'second'],
++      groupKey: 'turn:1',
++    }])
++  })
++
++  it('does not merge activity across Turn boundaries', () => {
++    const nodes = [tool('first', 1, 1), tool('second', 2, 1)]
++    expect(groupActivityOrder(nodes.map(node => node.key), lookup(nodes))).toHaveLength(2)
++  })
++
++  it('changes membership signature only when grouping facts change', () => {
++    const reasoning = assistant('assistant', 1, 2, ['reasoning'])
++    const visible = assistant('assistant', 1, 2, ['text'])
++    expect(activityMembershipSignature(['assistant'], lookup([reasoning])))
++      .not.toBe(activityMembershipSignature(['assistant'], lookup([visible])))
++  })
++})
+diff --git a/packages/client/ui-tool/src/client/apply.ts b/packages/client/ui-tool/src/client/apply.ts
+index ec2f0b8ec1..c9ed379e68 100644
+--- a/packages/client/ui-tool/src/client/apply.ts
++++ b/packages/client/ui-tool/src/client/apply.ts
+@@ -34,6 +34,11 @@ export function apply(ctx: ClientContext): void {
+     locale: NS,
+   }, ToolDetails))
+ 
++  ctx.slots.inject('conversation.chat.activity.toolDetail', () => ctx.slots.register({
++    name: 'conversation.chat.activity.toolDetail',
++    locale: NS,
++  }, ToolDetails))
++
+   ctx.plugin(bashToolviewSample)
+   ctx.plugin(readToolview)
+   ctx.plugin(fileMutationToolview)
+diff --git a/packages/client/ui-tool/src/client/contract/slots.ts b/packages/client/ui-tool/src/client/contract/slots.ts
+index 04af306db4..7d4f600140 100644
+--- a/packages/client/ui-tool/src/client/contract/slots.ts
++++ b/packages/client/ui-tool/src/client/contract/slots.ts
+@@ -50,3 +50,7 @@ export type ToolTreeProps = PropsRuntime<'conversation.chat.node', 'tool-call'>
+ 
+ /** Full props of the selected Tool output renderer in the details panel. */
+ export type ToolDetailsProps = PropsRuntime<'conversation.details.tool'> & PropsLocale<'conversation'>
++
++/** Full props of the compact inline Tool activity detail renderer. */
++export type ToolActivityDetailProps =
++  PropsRuntime<'conversation.chat.activity.toolDetail'> & PropsLocale<'conversation'>

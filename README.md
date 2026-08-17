@@ -55,6 +55,29 @@ node --test tests/*.test.mjs
 
 Use `node scripts/doctor.mjs --strict` when integration warnings should fail validation.
 
+## RC7 Compact Activity Shell Patch
+
+The horizontal Think/Tool activity grouping crosses sibling conversation nodes and therefore cannot be delivered entirely through a Client Plugin on DSH RC7. The version-locked source patch is stored at `patches/dsh-rc7-compact-activity.patch` and must be applied through the guarded installer:
+
+```sh
+node scripts/apply-dsh-shell-patch.mjs \
+  --source /path/to/deepseek-harness-rc7 \
+  --install /path/to/the/rc7/npx-install-root
+```
+
+Run a non-mutating compatibility check first when inspecting a new checkout:
+
+```sh
+node scripts/apply-dsh-shell-patch.mjs \
+  --check \
+  --source /path/to/deepseek-harness-rc7 \
+  --install /path/to/the/rc7/npx-install-root
+```
+
+The installer accepts exactly DSH `0.1.0-rc.7`, applies the patch idempotently, installs the pinned pnpm dependencies unless `--skip-deps` is supplied, runs Host contract generation, Client typechecking, focused Oxlint checks and UI tests, builds the two affected Client bundles, and backs up target bundles before deployment. Omitting `--install` patches and builds the source checkout without changing a runtime installation.
+
+Never reuse the RC7 patch or its compiled bundles on another DSH release. Port and validate a release-specific patch instead.
+
 ## Development Workflow
 
 1. Add or update a package under `plugins/`.
