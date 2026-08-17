@@ -1,0 +1,37 @@
+{
+  "name": "@dddrop/dsh-plugin-theme-blue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A compact blue dark theme for the DeepSeek Harness Web interface.",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-theme"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "files": [
+    "lib/client.js",
+    "src/**/*.js"
+  ],
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-ui-theme": "^0.1.0-rc.6"
+  }
+}

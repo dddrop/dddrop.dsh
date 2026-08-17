@@ -20,7 +20,10 @@ test('web profile manifest is valid', async () => {
   const manifest = await resolveProfileManifest()
 
   assert.equal(manifest.profile, 'web')
-  assert.deepEqual(manifest.plugins, ['../../plugins/kanban'])
+  assert.deepEqual(manifest.plugins, [
+    '../../plugins/kanban',
+    '../../plugins/theme-blue',
+  ])
 })
 
 test('repository package is private', async () => {

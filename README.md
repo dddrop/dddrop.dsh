@@ -15,6 +15,10 @@ Version-controlled DeepSeek Harness plugins, agent presets, related skills, and 
 
 ## Included Plugins
 
+### Theme Blue
+
+`plugins/theme-blue` provides the persistent dark blue Web theme, compact typography, restrained corner geometry, and blue-tinted depth used by this profile. See `plugins/theme-blue/README.md` for its design tokens and lifecycle.
+
 ### Kanban
 
 `plugins/kanban` provides one shared, Git-backed board in the conversation view. Static profile configuration defines its columns, movement rules, repository checkout, and pull/push policy. See `plugins/kanban/README.md` for architecture, synchronization, and installation details.

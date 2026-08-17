@@ -3,6 +3,8 @@
 # Keep this file as a top-level array of Cordis loader patch entries. Add
 # id-targeted configuration overrides, disabled flags, or inserted plugin rows.
 - insert:
+    - id: dddrop-theme-blue
+      name: '@dddrop/dsh-plugin-theme-blue'
     - id: dddrop-kanban
       name: '@dddrop/dsh-plugin-kanban'
       config:

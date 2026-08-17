@@ -1,6 +1,7 @@
 {
   "profile": "web",
   "plugins": [
-    "../../plugins/kanban"
+    "../../plugins/kanban",
+    "../../plugins/theme-blue"
   ]
 }
