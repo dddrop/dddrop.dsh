@@ -1,6 +1,13 @@
-import { copyFile, mkdir } from 'node:fs/promises'
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
 
 import {
   filesEqual,
@@ -12,7 +19,29 @@ import {
   webProfilePatchSourcePath,
 } from './lib/repository.mjs'
 
-async function installPlugin(profile, pluginPath) {
+async function readPathStatus(targetPath) {
+  try {
+    return await lstat(targetPath)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function packageTargetPath(profileDirectory, packageName) {
+  const parts = packageName.split('/')
+  const valid = packageName.startsWith('@')
+    ? parts.length === 2 && parts.every((part) => part.length > 1)
+    : parts.length === 1 && parts[0].length > 0
+
+  if (!valid || parts.some((part) => part === '.' || part === '..')) {
+    throw new Error(`Plugin package name is invalid: ${packageName}`)
+  }
+
+  return path.join(profileDirectory, 'node_modules', ...parts)
+}
+
+async function linkPlugin(profileDirectory, pluginPath) {
   const absolutePluginPath = resolvePluginPath(pluginPath)
   const packagePath = path.join(absolutePluginPath, 'package.json')
 
@@ -22,21 +51,77 @@ async function installPlugin(profile, pluginPath) {
     )
   }
 
-  const result = spawnSync(
-    'dsh',
-    ['plugin', '--profile', profile, 'add', `link:${absolutePluginPath}`],
-    { encoding: 'utf8', stdio: 'inherit' },
-  )
-
-  if (result.error) {
-    throw result.error
+  const packageManifest = JSON.parse(await readFile(packagePath, 'utf8'))
+  if (typeof packageManifest.name !== 'string') {
+    throw new Error(`Plugin path ${pluginPath} does not define a package name.`)
   }
 
-  if (result.status !== 0) {
+  const targetPath = packageTargetPath(
+    profileDirectory,
+    packageManifest.name,
+  )
+  const status = await readPathStatus(targetPath)
+
+  if (status?.isSymbolicLink()) {
+    const linkedPath = await readlink(targetPath)
+    const resolvedPath = path.resolve(path.dirname(targetPath), linkedPath)
+
+    if (resolvedPath !== absolutePluginPath) {
+      throw new Error(
+        `Plugin package ${packageManifest.name} is linked to ${resolvedPath}.`,
+      )
+    }
+
+    return {
+      changed: false,
+      name: packageManifest.name,
+      source: absolutePluginPath,
+    }
+  }
+
+  if (status) {
     throw new Error(
-      `DSH failed to install the linked plugin at ${absolutePluginPath}.`,
+      `Refusing to replace the existing plugin package at ${targetPath}.`,
     )
   }
+
+  await mkdir(path.dirname(targetPath), { recursive: true })
+  await symlink(
+    absolutePluginPath,
+    targetPath,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  )
+
+  return {
+    changed: true,
+    name: packageManifest.name,
+    source: absolutePluginPath,
+  }
+}
+
+async function updateProfileDependencies(profileDirectory, plugins) {
+  const packagePath = path.join(profileDirectory, 'package.json')
+  const profileManifest = JSON.parse(await readFile(packagePath, 'utf8'))
+  const dependencies = { ...profileManifest.dependencies }
+  let changed = false
+
+  for (const plugin of plugins) {
+    const specifier = `link:${plugin.source}`
+    if (dependencies[plugin.name] !== specifier) {
+      dependencies[plugin.name] = specifier
+      changed = true
+    }
+  }
+
+  if (!changed) return false
+
+  profileManifest.dependencies = Object.fromEntries(
+    Object.entries(dependencies).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  )
+  await writeFile(packagePath, `${JSON.stringify(profileManifest, null, 2)}\n`)
+  return true
 }
 
 export async function syncProfile({ installPlugins = true } = {}) {
@@ -50,10 +135,12 @@ export async function syncProfile({ installPlugins = true } = {}) {
     )
   }
 
+  const plugins = []
   if (installPlugins) {
     for (const pluginPath of manifest.plugins) {
-      await installPlugin(manifest.profile, pluginPath)
+      plugins.push(await linkPlugin(runtime.profileDirectory, pluginPath))
     }
+    await updateProfileDependencies(runtime.profileDirectory, plugins)
   }
 
   await mkdir(runtime.profileDirectory, { recursive: true })
@@ -73,7 +160,7 @@ export async function syncProfile({ installPlugins = true } = {}) {
 
   return {
     changed,
-    installedPlugins: installPlugins ? manifest.plugins.length : 0,
+    installedPlugins: plugins.length,
     profile: manifest.profile,
     profilePatch: runtime.profilePatch,
   }

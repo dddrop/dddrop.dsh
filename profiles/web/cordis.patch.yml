@@ -2,4 +2,32 @@
 #
 # Keep this file as a top-level array of Cordis loader patch entries. Add
 # id-targeted configuration overrides, disabled flags, or inserted plugin rows.
-[]
+- insert:
+    - id: dddrop-kanban
+      name: '@dddrop/dsh-plugin-kanban'
+      config:
+        repositoryPath: !!js "process.env.KANBAN_REPOSITORY_PATH ?? process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:os').homedir(), 'Development', 'dddrop.dsh.data')"
+        dataDirectory: kanban
+        branch: main
+        remote: origin
+        autoPull: true
+        autoPush: true
+        initializeRepository: false
+        pollIntervalMs: 3000
+        pullIntervalMs: 5000
+        columns:
+          - id: backlog
+            title: Backlog
+            allowedTransitions: [ready]
+          - id: ready
+            title: Ready
+            allowedTransitions: [backlog, in-progress]
+          - id: in-progress
+            title: In Progress
+            allowedTransitions: [ready, review]
+          - id: review
+            title: Review
+            allowedTransitions: [in-progress, done]
+          - id: done
+            title: Done
+            allowedTransitions: [review]

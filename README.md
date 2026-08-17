@@ -13,6 +13,12 @@ Version-controlled DeepSeek Harness plugins, agent presets, related skills, and 
 └── tests/               Repository-level validation tests
 ```
 
+## Included Plugins
+
+### Kanban
+
+`plugins/kanban` provides one shared, Git-backed board in the conversation view. Static profile configuration defines its columns, movement rules, repository checkout, and pull/push policy. See `plugins/kanban/README.md` for architecture, synchronization, and installation details.
+
 ## Requirements
 
 - Node.js 20 or newer

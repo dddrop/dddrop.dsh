@@ -5,7 +5,7 @@ This directory is the version-controlled source for custom DeepSeek Harness Web 
 ## Files
 
 - `cordis.patch.yml` contains composition patches applied after the shipped bundles.
-- `plugins.json` lists local plugin packages that should be linked into the Web profile.
+- `plugins.json` lists local plugin package paths, resolved relative to this directory, that should be linked into the Web profile.
 
 Run the synchronization script after changing either file:
 

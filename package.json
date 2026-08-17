@@ -5,12 +5,13 @@
   "type": "module",
   "description": "Version-controlled DeepSeek Harness plugins, agent presets, and profile configuration.",
   "scripts": {
+    "build": "node plugins/kanban/scripts/build-client.mjs",
     "setup": "node scripts/install.mjs",
     "link:presets": "node scripts/link-presets.mjs",
     "sync:profile": "node scripts/sync-profile.mjs",
     "doctor": "node scripts/doctor.mjs",
-    "check": "node scripts/doctor.mjs --strict && node --test tests/*.test.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "check": "node scripts/doctor.mjs --strict && node --test tests/*.test.mjs plugins/*/test/*.test.mjs",
+    "test": "node --test tests/*.test.mjs plugins/*/test/*.test.mjs"
   },
   "engines": {
     "node": ">=20"

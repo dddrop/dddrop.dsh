@@ -1,4 +1,4 @@
-import { lstat, readlink } from 'node:fs/promises'
+import { lstat, readFile, readlink } from 'node:fs/promises'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
@@ -47,6 +47,47 @@ async function inspectPresetLink(runtime) {
   }
 
   return result('pass', `DSH preset root points to ${presetSourcePath}`)
+}
+
+async function inspectPluginLink(profileDirectory, pluginPath) {
+  const sourcePath = resolvePluginPath(pluginPath)
+  const packagePath = path.join(sourcePath, 'package.json')
+  if (!(await pathExists(packagePath))) {
+    return result('error', `Plugin ${pluginPath} package is missing.`)
+  }
+
+  const packageManifest = JSON.parse(await readFile(packagePath, 'utf8'))
+  const targetPath = path.join(
+    profileDirectory,
+    'node_modules',
+    ...packageManifest.name.split('/'),
+  )
+
+  if (!(await pathExists(targetPath))) {
+    return result(
+      'warning',
+      `Plugin ${packageManifest.name} is not linked into the Web profile.`,
+    )
+  }
+
+  const status = await lstat(targetPath)
+  if (!status.isSymbolicLink()) {
+    return result(
+      'warning',
+      `Plugin ${packageManifest.name} exists in the Web profile but is not linked.`,
+    )
+  }
+
+  const linkedPath = await readlink(targetPath)
+  const resolvedPath = path.resolve(path.dirname(targetPath), linkedPath)
+  if (resolvedPath !== sourcePath) {
+    return result(
+      'warning',
+      `Plugin ${packageManifest.name} points to a different path: ${resolvedPath}`,
+    )
+  }
+
+  return result('pass', `Plugin ${packageManifest.name} is linked.`)
 }
 
 function inspectDshCommand() {
@@ -112,17 +153,23 @@ export async function runDoctor() {
           `DSH profile directory is not initialized: ${runtime.profileDirectory}`,
         ),
       )
-    } else if (
-      await filesEqual(webProfilePatchSourcePath, runtime.profilePatch)
-    ) {
-      results.push(result('pass', 'Web profile patch is synchronized.'))
     } else {
-      results.push(
-        result(
-          'warning',
-          `Web profile patch differs from ${runtime.profilePatch}`,
-        ),
-      )
+      for (const pluginPath of manifest.plugins) {
+        results.push(
+          await inspectPluginLink(runtime.profileDirectory, pluginPath),
+        )
+      }
+
+      if (await filesEqual(webProfilePatchSourcePath, runtime.profilePatch)) {
+        results.push(result('pass', 'Web profile patch is synchronized.'))
+      } else {
+        results.push(
+          result(
+            'warning',
+            `Web profile patch differs from ${runtime.profilePatch}`,
+          ),
+        )
+      }
     }
   }
 

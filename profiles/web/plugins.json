@@ -1,4 +1,6 @@
 {
   "profile": "web",
-  "plugins": []
+  "plugins": [
+    "../../plugins/kanban"
+  ]
 }
