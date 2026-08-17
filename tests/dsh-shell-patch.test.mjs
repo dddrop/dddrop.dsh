@@ -46,6 +46,13 @@ test('ships a complete RC7 compact activity patch', async () => {
 
   assert.match(patch, /ActivityCluster\.tsx/)
   assert.match(patch, /activity-groups\.ts/)
+  assert.match(patch, /ChatNodeSeat\.tsx/)
+  assert.match(patch, /data-activity-state='ok'/)
+  assert.match(patch, /flex-wrap: wrap/)
+  assert.match(patch, /width: 22px/)
+  assert.match(patch, /border-radius: 0 !important/)
+  assert.doesNotMatch(patch, /#9be9a8|#7ee787|#116329/)
+  assert.match(patch, /node\.kind === 'context'/)
   assert.match(patch, /conversation\.chat\.activity\.reasoningDetail/)
   assert.match(patch, /conversation\.chat\.activity\.toolDetail/)
   assert.match(patch, /activity-cluster\.client\.spec\.tsx/)

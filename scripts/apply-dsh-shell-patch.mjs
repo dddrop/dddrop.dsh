@@ -182,6 +182,7 @@ async function buildAndVerify(source, { skipDeps }) {
     'scripts/run-oxlint.ts',
     'packages/client/ui-conversation/src/client/chat/ActivityCluster.tsx',
     'packages/client/ui-conversation/src/client/chat/activity-groups.ts',
+    'packages/client/ui-conversation/src/client/chat/ChatNodeSeat.tsx',
     'packages/client/ui-conversation/src/client/chat/ChatView.tsx',
     'packages/client/ui-conversation/src/client/contract/slots.ts',
     'packages/client/ui-conversation/src/client/apply.ts',

@@ -13,10 +13,10 @@ index f57caea9e5..a76c04c8a3 100644
      inject: (sessionId: SessionId, actions: BoundActions<typeof chatStore>): ChatViewInjected => {
 diff --git a/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css b/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css
 new file mode 100644
-index 0000000000..dea6467e45
+index 0000000000..e5a27982ff
 --- /dev/null
 +++ b/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,155 @@
 +.root {
 +  min-width: 0;
 +  display: flex;
@@ -27,64 +27,64 @@ index 0000000000..dea6467e45
 +.strip {
 +  min-width: 0;
 +  display: flex;
++  flex-wrap: wrap;
 +  align-items: center;
-+  gap: 6px;
-+  overflow-x: auto;
-+  padding: 1px;
-+  scrollbar-width: thin;
++  gap: 4px;
++  padding: 2px;
 +}
 +
 +.chip {
-+  position: relative;
-+  width: 30px;
-+  height: 30px;
-+  flex: 0 0 30px;
++  width: 22px;
++  height: 22px;
++  flex: 0 0 22px;
 +  display: inline-flex;
 +  align-items: center;
 +  justify-content: center;
 +  padding: 0;
 +  border: 1px solid var(--dsw-alias-border-l1);
-+  border-radius: 6px;
++  border-radius: 0 !important;
 +  color: var(--dsw-alias-label-secondary);
 +  background: var(--dsw-alias-bg-layer-1);
 +  cursor: pointer;
-+  transition: border-color 160ms var(--ds-ease-in-out), color 160ms var(--ds-ease-in-out), background 160ms var(--ds-ease-in-out);
++  transition: border-color 120ms ease, color 120ms ease, background 120ms ease, transform 120ms ease;
++}
++
++.chip[data-activity-state='running'] {
++  border-color: color-mix(in srgb, var(--dsw-alias-label-secondary) 44%, var(--dsw-alias-border-l1));
++  color: var(--dsw-alias-label-primary);
++  background: color-mix(in srgb, var(--dsw-alias-label-secondary) 22%, var(--dsw-alias-bg-layer-1));
++}
++
++.chip[data-activity-state='ok'] {
++  border-color: var(--dsw-alias-border-l1);
++  color: var(--dsw-alias-label-secondary);
++  background: var(--dsw-alias-bg-layer-1);
++}
++
++.chip[data-activity-state='error'] {
++  border-color: var(--dsw-alias-state-error-primary);
++  color: var(--dsw-alias-state-error-primary);
++  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, var(--dsw-alias-bg-layer-1));
 +}
 +
 +.chip:hover {
-+  border-color: var(--dsw-alias-border-l2);
-+  color: var(--dsw-alias-label-primary);
-+  background: var(--dsw-alias-bg-layer-2);
++  filter: brightness(1.06);
++  transform: translateY(-1px);
++}
++
++.chip:active {
++  filter: brightness(0.98);
++  transform: scale(0.96);
 +}
 +
 +.chip[aria-expanded='true'] {
-+  border-color: var(--dsw-alias-brand-primary);
-+  color: var(--dsw-alias-brand-primary);
-+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 12%, var(--dsw-alias-bg-layer-1));
++  outline: 2px solid var(--dsw-alias-brand-primary);
++  outline-offset: 0;
 +}
 +
 +.chip:focus-visible {
-+  outline: 2px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 68%, transparent);
-+  outline-offset: 2px;
-+}
-+
-+.status {
-+  position: absolute;
-+  top: 3px;
-+  right: 3px;
-+  width: 5px;
-+  height: 5px;
-+  border-radius: 50%;
-+  background: var(--dsw-alias-state-success-primary);
-+}
-+
-+.status[data-state='running'] {
-+  background: var(--dsw-alias-brand-primary);
-+  animation: activity-pulse 1.4s ease-in-out infinite;
-+}
-+
-+.status[data-state='error'] {
-+  background: var(--dsw-alias-state-error-primary);
++  outline: 2px solid var(--dsw-alias-brand-primary);
++  outline-offset: 1px;
 +}
 +
 +.detail {
@@ -159,30 +159,25 @@ index 0000000000..dea6467e45
 +  line-height: 18px;
 +}
 +
++.contextDetail {
++  min-width: 0;
++  color: var(--dsw-alias-label-secondary);
++  font: var(--dsw-font-s-14);
++}
++
 +.initials {
 +  font-family: var(--ds-font-family-code);
-+  font-size: 9px;
++  font-size: 8px;
 +  font-weight: 700;
 +  letter-spacing: -0.04em;
 +  text-transform: uppercase;
 +}
-+
-+@keyframes activity-pulse {
-+  0%, 100% { opacity: 0.45; }
-+  50% { opacity: 1; }
-+}
-+
-+@media (prefers-reduced-motion: reduce) {
-+  .status[data-state='running'] {
-+    animation: none;
-+  }
-+}
 diff --git a/packages/client/ui-conversation/src/client/chat/ActivityCluster.tsx b/packages/client/ui-conversation/src/client/chat/ActivityCluster.tsx
 new file mode 100644
-index 0000000000..8d2ef579de
+index 0000000000..7c35e52573
 --- /dev/null
 +++ b/packages/client/ui-conversation/src/client/chat/ActivityCluster.tsx
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,300 @@
 +import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 +import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
 +import {
@@ -193,6 +188,7 @@ index 0000000000..8d2ef579de
 +} from '@deepseek-ai/dsh-client-ui-primitives'
 +import type { ChatViewSlotProps } from '../contract/slots.ts'
 +import type { ChatNode } from '../contract/chat-nodes.ts'
++import { contextBody } from './ContextBody.tsx'
 +import css from './ActivityCluster.module.css'
 +
 +type ActivityState = 'running' | 'ok' | 'error'
@@ -217,7 +213,15 @@ index 0000000000..8d2ef579de
 +  state: ActivityState
 +}
 +
-+type ActivityItem = ReasoningActivity | ToolActivity
++interface ContextActivity {
++  kind: 'context'
++  id: string
++  label: string
++  node: ChatNode<'context'>
++  state: 'ok'
++}
++
++type ActivityItem = ReasoningActivity | ToolActivity | ContextActivity
 +
 +interface ActivityClusterProps {
 +  nodeKeys: readonly string[]
@@ -263,7 +267,10 @@ index 0000000000..8d2ef579de
 +  for (const child of block.subCalls) appendTool(items, nodeKey, child)
 +}
 +
-+function collectActivities(nodes: readonly (ChatNode | undefined)[]): readonly ActivityItem[] {
++function collectActivities(
++  nodes: readonly (ChatNode | undefined)[],
++  t: ChatViewSlotProps['t'],
++): readonly ActivityItem[] {
 +  const items: ActivityItem[] = []
 +  for (const node of nodes) {
 +    if (node?.kind === 'assistant-step') {
@@ -282,23 +289,40 @@ index 0000000000..8d2ef579de
 +      })
 +      continue
 +    }
-+    if (node?.kind === 'tool-call') appendTool(items, node.key, node.data.root)
++    if (node?.kind === 'tool-call') {
++      appendTool(items, node.key, node.data.root)
++      continue
++    }
++    if (node?.kind === 'context') {
++      const title = t(node.data.provenance.role === 'recall'
++        ? 'message.contextRecall'
++        : 'message.contextInjection')
++      items.push({
++        kind: 'context',
++        id: `${node.key}:context`,
++        label: node.data.provenance.label === null
++          ? title
++          : `${title} · ${node.data.provenance.label}`,
++        node,
++        state: 'ok',
++      })
++    }
 +  }
 +  return items
 +}
 +
 +function toolGlyph(name: string): ReactNode {
-+  if (name === 'grep' || name === 'glob' || name.includes('search')) return <IconSearchOutline16 size={15} />
-+  if (name === 'read') return <IconBrowseOutline16 size={15} />
-+  if (name === 'edit' || name === 'write') return <IconEditOutline16 size={15} />
-+  if (name === 'bash' || name.includes('command')) return <IconCodeOutline16 size={15} />
-+  if (name.startsWith('cordis_')) return <IconCordisPluginOutline14 size={15} />
-+  if (name.startsWith('web_')) return <IconGlobeOutline14 size={15} />
-+  if (name === 'todo_write') return <IconChecklistOutline14 size={15} />
-+  if (name === 'skill') return <IconSkillOutline16 size={15} />
-+  if (name === 'ask_user_question') return <IconQuestionOutline14 size={15} />
++  if (name === 'grep' || name === 'glob' || name.includes('search')) return <IconSearchOutline16 size={13} />
++  if (name === 'read') return <IconBrowseOutline16 size={13} />
++  if (name === 'edit' || name === 'write') return <IconEditOutline16 size={13} />
++  if (name === 'bash' || name.includes('command')) return <IconCodeOutline16 size={13} />
++  if (name.startsWith('cordis_')) return <IconCordisPluginOutline14 size={13} />
++  if (name.startsWith('web_')) return <IconGlobeOutline14 size={13} />
++  if (name === 'todo_write') return <IconChecklistOutline14 size={13} />
++  if (name === 'skill') return <IconSkillOutline16 size={13} />
++  if (name === 'ask_user_question') return <IconQuestionOutline14 size={13} />
 +  const initials = name.split(/[_-]/u).filter(Boolean).slice(0, 2).map(part => part[0]).join('')
-+  return initials === '' ? <IconDataOutline16 size={15} /> : <span className={css.initials}>{initials}</span>
++  return initials === '' ? <IconDataOutline16 size={13} /> : <span className={css.initials}>{initials}</span>
 +}
 +
 +function flattenedResult(block: ToolCallBlock): string {
@@ -330,8 +354,11 @@ index 0000000000..8d2ef579de
 +      data-chat-call-id={item.kind === 'tool' ? item.callId : undefined}
 +      onClick={onSelect}
 +    >
-+      {item.kind === 'reasoning' ? <IconThinkOutline16 size={15} /> : toolGlyph(item.toolName)}
-+      <span className={css.status} data-state={item.state} aria-hidden />
++      {item.kind === 'reasoning'
++        ? <IconThinkOutline16 size={13} />
++        : item.kind === 'context'
++          ? <IconBrowseOutline16 size={13} />
++          : toolGlyph(item.toolName)}
 +    </button>
 +  )
 +}
@@ -350,7 +377,7 @@ index 0000000000..8d2ef579de
 +    snapshot => nodeKeys.map(key => snapshot.chat.nodes.get(key) as ChatNode | undefined),
 +    sameNodeRefs,
 +  )
-+  const items = useMemo(() => collectActivities(nodes), [nodes])
++  const items = useMemo(() => collectActivities(nodes, t), [nodes, t])
 +  const codeLabels = useMemo(() => ({ copyLabel: t('copy'), copiedLabel: t('copied') }), [t])
 +  const [selectedId, setSelectedId] = useState<string | null>(null)
 +  const panelId = useId()
@@ -393,6 +420,18 @@ index 0000000000..8d2ef579de
 +          fallback: <ToolFallback item={selected} runningLabel={t('details.running')} />,
 +        })}
 +      </>
++    )
++  } else if (selected?.kind === 'context') {
++    const data = selected.node.data
++    const context = contextBody(data.form, {
++      content: data.content,
++      source: data.source,
++      t,
++    })
++    detailBody = (
++      <div className={css.contextDetail} data-context-form={context.rendered ?? undefined}>
++        {context.body}
++      </div>
 +    )
 +  }
 +
@@ -439,8 +478,47 @@ index 0000000000..8d2ef579de
 +    </div>
 +  )
 +}
+diff --git a/packages/client/ui-conversation/src/client/chat/ChatNodeSeat.tsx b/packages/client/ui-conversation/src/client/chat/ChatNodeSeat.tsx
+index f3343a183f..1e3e844886 100644
+--- a/packages/client/ui-conversation/src/client/chat/ChatNodeSeat.tsx
++++ b/packages/client/ui-conversation/src/client/chat/ChatNodeSeat.tsx
+@@ -6,6 +6,7 @@ import css from './ChatView.module.css'
+ 
+ interface ChatNodeSeatProps extends ChatNodeOwnerProps {
+   readonly nodeKey: string
++  readonly hideReasoning?: boolean | undefined
+   readonly useSession: ChatViewSlotProps['useSession']
+   readonly renderSlot: ChatViewSlotProps['renderSlot']
+   readonly t: ChatViewSlotProps['t']
+@@ -15,13 +16,24 @@ type RoutedChatNodeOwner = {
+   [Kind in ChatNode['kind']]: ChatNodeOwnerProps & { readonly node: ChatNode<Kind> }
+ }[ChatNode['kind']]
+ 
++function projectedNode(node: ChatNode | undefined, hideReasoning: boolean | undefined): ChatNode | undefined {
++  if (node?.kind !== 'assistant-step' || hideReasoning !== true) return node
++  return {
++    ...node,
++    data: {
++      ...node.data,
++      blocks: node.data.blocks.filter(block => block.kind !== 'reasoning'),
++    },
++  }
++}
++
+ /** Subscribe and dispatch one stable Context key without observing sibling Nodes. */
+ export const ChatNodeSeat = memo(function ChatNodeSeat({
+-  nodeKey, selectedCallId, cwd, openFile, inspectCall, forkAt,
++  nodeKey, hideReasoning, selectedCallId, cwd, openFile, inspectCall, forkAt,
+   loadImage, fileMentions, useSession, renderSlot, t,
+ }: ChatNodeSeatProps) {
+   const node = useSession(snapshot => snapshot.chat.nodes.get(nodeKey))
+-  const routedNode = node as ChatNode | undefined
++  const routedNode = projectedNode(node as ChatNode | undefined, hideReasoning)
+   const owner = useMemo<ChatNodeOwnerProps | null>(() => node === undefined
+     ? null
+     : {
 diff --git a/packages/client/ui-conversation/src/client/chat/ChatView.tsx b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
-index 58e63b312f..25502a1ebf 100644
+index 58e63b312f..b68c9a8396 100644
 --- a/packages/client/ui-conversation/src/client/chat/ChatView.tsx
 +++ b/packages/client/ui-conversation/src/client/chat/ChatView.tsx
 @@ -16,7 +16,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -469,7 +547,7 @@ index 58e63b312f..25502a1ebf 100644
  
    const pendingSteering = useMemo(
      () => inbox.filter(item => item.placement === 'steering'),
-@@ -362,6 +373,46 @@ export function ChatView({
+@@ -362,6 +373,47 @@ export function ChatView({
      loadOlder()
    }
  
@@ -499,6 +577,7 @@ index 58e63b312f..25502a1ebf 100644
 +      <ChatNodeSeat
 +        key={unit.key}
 +        nodeKey={unit.nodeKey}
++        hideReasoning={unit.hideReasoning}
 +        useSession={useSession}
 +        selectedCallId={selectedCallId}
 +        cwd={cwd}
@@ -516,7 +595,7 @@ index 58e63b312f..25502a1ebf 100644
    return (
      <div className={css.root}>
        <div ref={listRef} className={css.scroll}>
-@@ -379,22 +430,7 @@ export function ChatView({
+@@ -379,22 +431,7 @@ export function ChatView({
                </button>
              </div>
            )}
@@ -542,10 +621,10 @@ index 58e63b312f..25502a1ebf 100644
                double-render the same wait. */}
 diff --git a/packages/client/ui-conversation/src/client/chat/activity-groups.ts b/packages/client/ui-conversation/src/client/chat/activity-groups.ts
 new file mode 100644
-index 0000000000..0d496f4462
+index 0000000000..1191c267c2
 --- /dev/null
 +++ b/packages/client/ui-conversation/src/client/chat/activity-groups.ts
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,100 @@
 +import type { ChatNode } from '../contract/chat-nodes.ts'
 +
 +export interface ActivityGroupUnit {
@@ -559,46 +638,57 @@ index 0000000000..0d496f4462
 +  kind: 'node'
 +  key: string
 +  nodeKey: string
++  /** Project reasoning into the preceding activity strip instead of rendering a duplicate Think row. */
++  hideReasoning?: true
 +}
 +
 +export type ChatFlowUnit = ActivityGroupUnit | ChatNodeUnit
 +
 +type NodeLookup = (key: string) => ChatNode | undefined
 +
-+function isReasoningOnlyAssistant(node: ChatNode): boolean {
-+  if (node.kind !== 'assistant-step') return false
-+  let hasReasoning = false
-+  for (const block of node.data.blocks) {
-+    if (block.kind === 'reasoning') {
-+      hasReasoning = true
-+      continue
-+    }
-+    if (block.kind !== 'tool-call') return false
-+  }
-+  return hasReasoning
++function assistantHasReasoning(node: ChatNode): boolean {
++  return node.kind === 'assistant-step'
++    && node.data.blocks.some(block => block.kind === 'reasoning')
++}
++
++function assistantHasVisibleBody(node: ChatNode): boolean {
++  return node.kind === 'assistant-step'
++    && node.data.blocks.some(block => block.kind !== 'reasoning' && block.kind !== 'tool-call')
++}
++
++function turnGroupKey(node: ChatNode): string | null {
++  if (node.location.kind !== 'turn' && node.location.kind !== 'step') return null
++  return `turn:${node.location.turn.turn}`
 +}
 +
 +/** Return the owning Turn for nodes that the compact activity surface may claim. */
 +export function activityGroupKey(node: ChatNode): string | null {
-+  if (node.kind !== 'tool-call' && !isReasoningOnlyAssistant(node)) return null
-+  if (node.location.kind !== 'step') return null
-+  return `turn:${node.location.step.turn}`
++  if (node.kind === 'context') {
++    return turnGroupKey(node) ?? `context:${node.key}`
++  }
++  if (node.kind !== 'tool-call' && !assistantHasReasoning(node)) return null
++  return turnGroupKey(node)
 +}
 +
 +/**
 + * Track only grouping-relevant node facts. Streaming text and Tool settlement
-+ * do not rebuild the whole Chat list; a new activity member or changed block
-+ * classification does.
++ * do not rebuild the whole Chat list; a new activity member or Assistant body
++ * projection does.
 + */
 +export function activityMembershipSignature(order: readonly string[], lookup: NodeLookup): string {
 +  return order.map((key) => {
 +    const node = lookup(key)
 +    if (node === undefined) return `${key}:missing`
-+    return `${key}:${activityGroupKey(node) ?? 'node'}`
++    const groupKey = activityGroupKey(node)
++    if (groupKey === null) return `${key}:node`
++    return `${key}:${groupKey}:${assistantHasVisibleBody(node) ? 'body' : 'activity'}`
 +  }).join('|')
 +}
 +
-+/** Group consecutive reasoning-only Assistant and Tool nodes in the same Turn. */
++/**
++ * Group consecutive activity nodes by Turn. Mixed Assistant nodes contribute
++ * reasoning to the compact strip and retain a reasoning-free prose renderer.
++ */
 +export function groupActivityOrder(order: readonly string[], lookup: NodeLookup): readonly ChatFlowUnit[] {
 +  const units: ChatFlowUnit[] = []
 +  for (const nodeKey of order) {
@@ -608,20 +698,30 @@ index 0000000000..0d496f4462
 +      units.push({ kind: 'node', key: nodeKey, nodeKey })
 +      continue
 +    }
++
 +    const previous = units.at(-1)
 +    if (previous?.kind === 'activity' && previous.groupKey === activityKey) {
 +      units[units.length - 1] = {
 +        ...previous,
 +        nodeKeys: [...previous.nodeKeys, nodeKey],
 +      }
-+      continue
++    } else {
++      units.push({
++        kind: 'activity',
++        key: `activity:${nodeKey}`,
++        nodeKeys: [nodeKey],
++        groupKey: activityKey,
++      })
 +    }
-+    units.push({
-+      kind: 'activity',
-+      key: `activity:${nodeKey}`,
-+      nodeKeys: [nodeKey],
-+      groupKey: activityKey,
-+    })
++
++    if (node !== undefined && assistantHasVisibleBody(node)) {
++      units.push({
++        kind: 'node',
++        key: `${nodeKey}:body`,
++        nodeKey,
++        hideReasoning: true,
++      })
++    }
 +  }
 +  return units
 +}
@@ -720,10 +820,10 @@ index c9b6f658ca..46740ceda7 100644
    'todo.progress.active': '{active} in progress',
 diff --git a/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx b/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx
 new file mode 100644
-index 0000000000..5dbb7472d8
+index 0000000000..335e492a9a
 --- /dev/null
 +++ b/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,156 @@
 +// @vitest-environment jsdom
 +import { afterEach, describe, expect, it, vi } from 'vitest'
 +import { cleanup, fireEvent, render } from '@testing-library/react'
@@ -732,6 +832,7 @@ index 0000000000..5dbb7472d8
 +import type { ChatNode } from '../src/client/contract/chat-nodes.ts'
 +import type { ChatViewSlotProps } from '../src/client/contract/slots.ts'
 +import { ActivityCluster } from '../src/client/chat/ActivityCluster.tsx'
++import { ChatNodeSeat } from '../src/client/chat/ChatNodeSeat.tsx'
 +import { zh } from '../src/client/locales.ts'
 +
 +afterEach(cleanup)
@@ -750,7 +851,7 @@ index 0000000000..5dbb7472d8
 +      kind: 'assistant-step',
 +      location,
 +      data: {
-+        status: 'settled',
++        status: 'running',
 +        turn: 1,
 +        step: 1,
 +        time: 1,
@@ -770,11 +871,25 @@ index 0000000000..5dbb7472d8
 +          call: { name: 'read', argsRaw: '{"file_path":"README.md"}' },
 +          callTime: 1,
 +          content: [{ type: 'text', text: 'file body' }],
-+          isError: false,
++          isError: true,
 +          callView: null,
 +          resultView: null,
 +          subCalls: [],
 +        },
++      },
++    },
++    {
++      key: 'context',
++      kind: 'context',
++      location,
++      data: {
++        kind: 'context',
++        seq: 3,
++        time: 3,
++        content: [{ type: 'text', text: 'Current runtime context' }],
++        source: { kind: 'plugin', plugin: 'runtime' },
++        provenance: { role: 'inject', label: 'runtime' },
++        form: null,
 +      },
 +    },
 +  ] as unknown as readonly ChatNode[]
@@ -789,7 +904,7 @@ index 0000000000..5dbb7472d8
 +    ? <div>Reasoning detail: {owner.text}</div>
 +    : <div>Tool detail: {owner.toolName}</div>) as ChatViewSlotProps['renderSlot']
 +  return {
-+    nodeKeys: ['assistant', 'tool'],
++    nodeKeys: ['assistant', 'tool', 'context'],
 +    useSession,
 +    renderSlot,
 +    openFile: () => {},
@@ -799,11 +914,51 @@ index 0000000000..5dbb7472d8
 +}
 +
 +describe('ActivityCluster', () => {
++  it('removes projected reasoning from a mixed Assistant body', () => {
++    const mixed = {
++      ...nodes()[0],
++      data: {
++        ...nodes()[0]?.data,
++        blocks: [
++          { kind: 'reasoning', text: 'hidden reasoning' },
++          { kind: 'text', text: 'visible answer' },
++        ],
++      },
++    } as ChatNode<'assistant-step'>
++    const snapshot = { chat: { nodes: { get: () => mixed } } }
++    const useSession = ((selector: (value: typeof snapshot) => unknown) => selector(snapshot)) as unknown as ChatViewSlotProps['useSession']
++    const renderSlot = ((_key: string, owner: { node: ChatNode<'assistant-step'> }) => (
++      <div>{owner.node.data.blocks.map(block => block.kind).join(',')}</div>
++    )) as ChatViewSlotProps['renderSlot']
++    const view = render(
++      <ChatNodeSeat
++        nodeKey="assistant"
++        hideReasoning
++        useSession={useSession}
++        renderSlot={renderSlot}
++        selectedCallId={undefined}
++        openFile={() => {}}
++        inspectCall={() => {}}
++        forkAt={() => {}}
++        loadImage={() => Promise.reject(new Error('unused'))}
++        fileMentions={() => undefined}
++        t={t}
++      />,
++    )
++
++    expect(view.getByText('text')).toBeTruthy()
++    expect(view.queryByText(/reasoning/)).toBeNull()
++  })
++
 +  it('shows icons first, switches one inline panel, and preserves side inspection', () => {
 +    const inspectCall = vi.fn()
 +    const view = render(<ActivityCluster {...props(inspectCall)} />)
 +    const think = view.getByRole('button', { name: 'Think' })
 +    const read = view.getByRole('button', { name: 'read' })
++    const context = view.getByRole('button', { name: '上下文注入 · runtime' })
++    expect(think.getAttribute('data-activity-state')).toBe('running')
++    expect(read.getAttribute('data-activity-state')).toBe('error')
++    expect(context.getAttribute('data-activity-state')).toBe('ok')
 +    expect(view.queryByLabelText('活动详情')).toBeNull()
 +
 +    fireEvent.click(think)
@@ -818,14 +973,19 @@ index 0000000000..5dbb7472d8
 +
 +    fireEvent.click(view.getByRole('button', { name: '在右侧详情中打开' }))
 +    expect(inspectCall).toHaveBeenCalledWith('call-1')
++
++    fireEvent.click(context)
++    expect(view.queryByText('Tool detail: read')).toBeNull()
++    expect(view.getByText('Current runtime context')).toBeTruthy()
++    expect(view.getAllByLabelText('活动详情')).toHaveLength(1)
 +  })
 +})
 diff --git a/packages/client/ui-conversation/tests/activity-groups.client.spec.ts b/packages/client/ui-conversation/tests/activity-groups.client.spec.ts
 new file mode 100644
-index 0000000000..9b2a5ca822
+index 0000000000..2e44d88d5d
 --- /dev/null
 +++ b/packages/client/ui-conversation/tests/activity-groups.client.spec.ts
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,125 @@
 +import { describe, expect, it } from 'vitest'
 +import type { ChatNode } from '../src/client/contract/chat-nodes.ts'
 +import { activityMembershipSignature, groupActivityOrder } from '../src/client/chat/activity-groups.ts'
@@ -877,6 +1037,23 @@ index 0000000000..9b2a5ca822
 +  } as unknown as ChatNode
 +}
 +
++function context(key: string, turn: number, step: number): ChatNode {
++  return {
++    key,
++    kind: 'context',
++    location: stepLocation(turn, step),
++    data: {
++      kind: 'context',
++      seq: 1,
++      time: 1,
++      content: [{ type: 'text', text: 'runtime context' }],
++      source: { kind: 'plugin', plugin: 'runtime' },
++      provenance: { role: 'inject', label: 'runtime' },
++      form: null,
++    },
++  } as unknown as ChatNode
++}
++
 +function lookup(nodes: readonly ChatNode[]): (key: string) => ChatNode | undefined {
 +  const byKey = new Map(nodes.map(node => [node.key, node]))
 +  return key => byKey.get(key)
@@ -893,10 +1070,11 @@ index 0000000000..9b2a5ca822
 +    }])
 +  })
 +
-+  it('keeps visible Assistant prose on the ordinary renderer path', () => {
++  it('projects mixed Assistant reasoning into activity while preserving prose', () => {
 +    const nodes = [assistant('assistant', 1, 2, ['reasoning', 'text']), tool('tool', 1, 2)]
 +    expect(groupActivityOrder(nodes.map(node => node.key), lookup(nodes))).toEqual([
-+      { kind: 'node', key: 'assistant', nodeKey: 'assistant' },
++      { kind: 'activity', key: 'activity:assistant', nodeKeys: ['assistant'], groupKey: 'turn:1' },
++      { kind: 'node', key: 'assistant:body', nodeKey: 'assistant', hideReasoning: true },
 +      { kind: 'activity', key: 'activity:tool', nodeKeys: ['tool'], groupKey: 'turn:1' },
 +    ])
 +  })
@@ -916,9 +1094,19 @@ index 0000000000..9b2a5ca822
 +    expect(groupActivityOrder(nodes.map(node => node.key), lookup(nodes))).toHaveLength(2)
 +  })
 +
-+  it('changes membership signature only when grouping facts change', () => {
++  it('includes context injection in its owning Turn activity group', () => {
++    const nodes = [tool('tool', 1, 1), context('context', 1, 2)]
++    expect(groupActivityOrder(nodes.map(node => node.key), lookup(nodes))).toEqual([{
++      kind: 'activity',
++      key: 'activity:tool',
++      nodeKeys: ['tool', 'context'],
++      groupKey: 'turn:1',
++    }])
++  })
++
++  it('changes membership signature when a mixed Assistant gains visible prose', () => {
 +    const reasoning = assistant('assistant', 1, 2, ['reasoning'])
-+    const visible = assistant('assistant', 1, 2, ['text'])
++    const visible = assistant('assistant', 1, 2, ['reasoning', 'text'])
 +    expect(activityMembershipSignature(['assistant'], lookup([reasoning])))
 +      .not.toBe(activityMembershipSignature(['assistant'], lookup([visible])))
 +  })

@@ -57,7 +57,7 @@ Use `node scripts/doctor.mjs --strict` when integration warnings should fail val
 
 ## RC7 Compact Activity Shell Patch
 
-The horizontal Think/Tool activity grouping crosses sibling conversation nodes and therefore cannot be delivered entirely through a Client Plugin on DSH RC7. The version-locked source patch is stored at `patches/dsh-rc7-compact-activity.patch` and must be applied through the guarded installer:
+The horizontal Think/Tool/context-injection activity grouping crosses sibling conversation nodes and therefore cannot be delivered entirely through a Client Plugin on DSH RC7. The version-locked source patch is stored at `patches/dsh-rc7-compact-activity.patch` and must be applied through the guarded installer:
 
 ```sh
 node scripts/apply-dsh-shell-patch.mjs \
