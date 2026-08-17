@@ -1,6 +1,6 @@
 {
   "name": "@dddrop/dsh-plugin-theme-blue",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "A compact blue dark theme for the DeepSeek Harness Web interface.",
@@ -32,6 +32,6 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-ui-theme": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-client-ui-theme": "^0.1.0-rc.7"
   }
 }

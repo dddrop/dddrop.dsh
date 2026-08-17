@@ -10,7 +10,7 @@
 - Restrained `4px`, `6px`, and `8px` corner radii.
 - Blue-tinted depth shadows and visible keyboard focus states.
 
-The Client plugin registers the `theme-blue` theme through the DSH `theme` service, installs the supplementary typography and geometry stylesheet through a Cordis-managed effect, and selects the theme when mounted.
+The Client plugin registers the `theme-blue` theme through the DSH `theme` service, installs the supplementary typography and geometry stylesheet through a Cordis-managed effect, and keeps the custom theme selected after the built-in durable preference finishes loading.
 
 ## Build and test
 

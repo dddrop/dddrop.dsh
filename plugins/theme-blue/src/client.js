@@ -22,7 +22,23 @@ export function createClientPlugin() {
   }
   const css = `
     body {
+      --dsw-alias-bg-base: #070c14 !important;
+      --dsw-alias-bg-layer-1: #0c1522 !important;
+      --dsw-alias-bg-layer-2: #111d2c !important;
+      --dsw-alias-bg-overlay: #142236 !important;
+      --dsw-alias-border-l1: #1b3048 !important;
+      --dsw-alias-border-l2: #2b4f72 !important;
+      --dsw-alias-brand-primary: #3b8cff !important;
+      --dsw-alias-label-primary: #e8f1ff !important;
+      --dsw-alias-label-secondary: #8ca6c2 !important;
+      --dsw-alias-state-error-primary: #ff7185 !important;
+      --dsw-alias-state-success-primary: #4bc69a !important;
+      --dsw-alias-state-warn-primary: #e8b65d !important;
+      --dsw-specific-sidebar-fill: #09121f !important;
       --dsw-font-family: 'Avenir Next', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      color-scheme: dark;
+      color: var(--dsw-alias-label-primary);
+      background: var(--dsw-alias-bg-base);
       --dsw-font-markdown-h1: 700 22px/30px var(--dsw-font-family);
       --dsw-font-markdown-h1-font-size: 22px;
       --dsw-font-markdown-h1-line-height: 30px;
@@ -116,9 +132,32 @@ export function createClientPlugin() {
   }
 
   function apply(ctx) {
+    const selectTheme = () => {
+      if (typeof document !== 'undefined') {
+        document.body.setAttribute('data-ds-dark-theme', '')
+      }
+      if (ctx.theme.getTheme().preference !== definition.id) {
+        ctx.theme.setTheme(definition.id)
+      }
+    }
+
     ctx.effect(() => ctx.theme.register(definition))
+    ctx.on('theme/change', selectTheme)
+    ctx.effect(() => {
+      if (typeof document === 'undefined') return () => {}
+      const bodyWasDark = document.body.hasAttribute('data-ds-dark-theme')
+      document.body.setAttribute('data-ds-dark-theme', '')
+      return () => {
+        if (!bodyWasDark) document.body.removeAttribute('data-ds-dark-theme')
+      }
+    })
+    ctx.effect(() => {
+      if (typeof window === 'undefined') return () => {}
+      const timer = window.setInterval(selectTheme, 500)
+      return () => window.clearInterval(timer)
+    })
     ctx.effect(installStyles)
-    ctx.theme.setTheme(definition.id)
+    selectTheme()
   }
 
   return {
