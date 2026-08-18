@@ -17,7 +17,7 @@ Version-controlled DeepSeek Harness plugins, agent presets, related skills, and 
 
 ### Theme Blue
 
-`plugins/theme-blue` provides the persistent dark blue Web theme, compact typography, restrained corner geometry, and blue-tinted depth used by this profile. See `plugins/theme-blue/README.md` for its design tokens and lifecycle.
+`plugins/theme-blue` provides persistent blue Light and Dark palettes, compact typography, and restrained corner geometry while preserving the built-in appearance controls and elevation. See `plugins/theme-blue/README.md` for its design tokens and lifecycle.
 
 ### Kanban
 

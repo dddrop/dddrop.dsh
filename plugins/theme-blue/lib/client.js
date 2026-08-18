@@ -7,44 +7,24 @@ window.__ModuleLoader__.load({
     const plugin = (function createClientPlugin() {
   const PACKAGE_ID = '@dddrop/dsh-plugin-theme-blue'
   const STYLE_ID = `${PACKAGE_ID}/styles`
-  const definition = {
-    id: 'theme-blue',
-    colorScheme: 'dark',
-    tokens: {
-      '--dsw-alias-bg-base': '#070c14',
-      '--dsw-alias-bg-layer-1': '#0c1522',
-      '--dsw-alias-bg-layer-2': '#111d2c',
-      '--dsw-alias-bg-overlay': '#142236',
-      '--dsw-alias-border-l1': '#1b3048',
-      '--dsw-alias-border-l2': '#2b4f72',
-      '--dsw-alias-brand-primary': '#3b8cff',
-      '--dsw-alias-label-primary': '#e8f1ff',
-      '--dsw-alias-label-secondary': '#8ca6c2',
-      '--dsw-alias-state-error-primary': '#ff7185',
-      '--dsw-alias-state-success-primary': '#4bc69a',
-      '--dsw-alias-state-warn-primary': '#e8b65d',
-      '--dsw-specific-sidebar-fill': '#09121f',
-    },
+  const tokenOverrides = {
+    '--dsw-alias-bg-base': { light: '#f4f7fa', dark: '#070c14' },
+    '--dsw-alias-bg-layer-1': { light: '#ffffff', dark: '#0c1522' },
+    '--dsw-alias-bg-layer-2': { light: '#eaf0f6', dark: '#111d2c' },
+    '--dsw-alias-bg-overlay': { light: '#ffffff', dark: '#142236' },
+    '--dsw-alias-border-l1': { light: '#d5e0e8', dark: '#1b3048' },
+    '--dsw-alias-border-l2': { light: '#b8c9d8', dark: '#2b4f72' },
+    '--dsw-alias-brand-primary': { light: '#2563eb', dark: '#3b8cff' },
+    '--dsw-alias-label-primary': { light: '#1d2b38', dark: '#e8f1ff' },
+    '--dsw-alias-label-secondary': { light: '#698096', dark: '#8ca6c2' },
+    '--dsw-alias-state-error-primary': { light: '#d43f55', dark: '#ff7185' },
+    '--dsw-alias-state-success-primary': { light: '#16856a', dark: '#4bc69a' },
+    '--dsw-alias-state-warn-primary': { light: '#a96f16', dark: '#e8b65d' },
+    '--dsw-specific-sidebar-fill': { light: '#f9fbfd', dark: '#09121f' },
   }
   const css = `
     body {
-      --dsw-alias-bg-base: #070c14 !important;
-      --dsw-alias-bg-layer-1: #0c1522 !important;
-      --dsw-alias-bg-layer-2: #111d2c !important;
-      --dsw-alias-bg-overlay: #142236 !important;
-      --dsw-alias-border-l1: #1b3048 !important;
-      --dsw-alias-border-l2: #2b4f72 !important;
-      --dsw-alias-brand-primary: #3b8cff !important;
-      --dsw-alias-label-primary: #e8f1ff !important;
-      --dsw-alias-label-secondary: #8ca6c2 !important;
-      --dsw-alias-state-error-primary: #ff7185 !important;
-      --dsw-alias-state-success-primary: #4bc69a !important;
-      --dsw-alias-state-warn-primary: #e8b65d !important;
-      --dsw-specific-sidebar-fill: #09121f !important;
       --dsw-font-family: 'Avenir Next', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-      color-scheme: dark;
-      color: var(--dsw-alias-label-primary);
-      background: var(--dsw-alias-bg-base);
       --dsw-font-markdown-h1: 700 22px/30px var(--dsw-font-family);
       --dsw-font-markdown-h1-font-size: 22px;
       --dsw-font-markdown-h1-line-height: 30px;
@@ -86,10 +66,6 @@ window.__ModuleLoader__.load({
       --dsw-font-xxs-12-font-size: 11px;
       --dsw-font-xxs-12-line-height: 17px;
       --dsw-font-xxs-strong-12: 600 11px/17px var(--dsw-font-family);
-      --dsw-shadow-lv1: 0 2px 5px rgb(0 26 64 / 20%);
-      --dsw-shadow-lv1-blur: 0 5px 16px rgb(0 26 64 / 16%);
-      --dsw-shadow-lv2: 0 8px 24px rgb(0 22 54 / 22%);
-      --dsw-shadow-lv3: 0 16px 42px rgb(0 18 46 / 30%);
       font-feature-settings: 'kern' 1, 'ss01' 1;
       letter-spacing: 0.005em;
     }
@@ -105,7 +81,6 @@ window.__ModuleLoader__.load({
 
     body :where([role='dialog'], [role='menu'], [role='listbox'], [role='tooltip'], [role='tabpanel']) {
       border-radius: 8px !important;
-      box-shadow: var(--dsw-shadow-lv2);
     }
 
     body :where([role='tab']) {
@@ -138,32 +113,8 @@ window.__ModuleLoader__.load({
   }
 
   function apply(ctx) {
-    const selectTheme = () => {
-      if (typeof document !== 'undefined') {
-        document.body.setAttribute('data-ds-dark-theme', '')
-      }
-      if (ctx.theme.getTheme().preference !== definition.id) {
-        ctx.theme.setTheme(definition.id)
-      }
-    }
-
-    ctx.effect(() => ctx.theme.register(definition))
-    ctx.on('theme/change', selectTheme)
-    ctx.effect(() => {
-      if (typeof document === 'undefined') return () => {}
-      const bodyWasDark = document.body.hasAttribute('data-ds-dark-theme')
-      document.body.setAttribute('data-ds-dark-theme', '')
-      return () => {
-        if (!bodyWasDark) document.body.removeAttribute('data-ds-dark-theme')
-      }
-    })
-    ctx.effect(() => {
-      if (typeof window === 'undefined') return () => {}
-      const timer = window.setInterval(selectTheme, 500)
-      return () => window.clearInterval(timer)
-    })
+    ctx.effect(() => ctx.theme.overrideTokens(PACKAGE_ID, tokenOverrides))
     ctx.effect(installStyles)
-    selectTheme()
   }
 
   return {

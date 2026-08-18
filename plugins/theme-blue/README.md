@@ -1,16 +1,17 @@
 # Theme Blue
 
-`@dddrop/dsh-plugin-theme-blue` provides a persistent dark blue theme for the DeepSeek Harness Web interface.
+`@dddrop/dsh-plugin-theme-blue` provides a persistent blue visual layer for the DeepSeek Harness Web interface while preserving the built-in Light, Dark, and System preferences.
 
 ## Design
 
-- Deep navy application and sidebar surfaces.
-- Blue primary accent (`#3b8cff`).
+- Cool gray-white Light surfaces inspired by the reference workspace.
+- Deep navy Dark application and sidebar surfaces.
+- Blue primary accents (`#2563eb` in Light and `#3b8cff` in Dark).
 - Compact Avenir-first typography.
 - Restrained `4px`, `6px`, and `8px` corner radii.
-- Blue-tinted depth shadows and visible keyboard focus states.
+- Native mode-aware elevation and visible blue keyboard focus states.
 
-The Client plugin registers the `theme-blue` theme through the DSH `theme` service, installs the supplementary typography and geometry stylesheet through a Cordis-managed effect, and keeps the custom theme selected after the built-in durable preference finishes loading.
+The Client plugin uses the DSH `theme` service to install paired Light and Dark token overrides, then adds supplementary typography and geometry styles through a Cordis-managed effect. The built-in appearance controls remain authoritative, so Light, Dark, and System continue to work normally.
 
 ## Build and test
 
@@ -21,4 +22,4 @@ npm test
 
 The repository Web profile links this package and mounts it through `profiles/web/cordis.patch.yml`. Run `node scripts/sync-profile.mjs` from the repository root after changing the package or profile source.
 
-The dynamic Cordis package used during design is not required after the persistent profile is restarted. Do not run both implementations in the same process because both register the same `theme-blue` theme id.
+The dynamic Cordis package used during design is not required after the persistent profile is restarted. Do not run both implementations together because their theme token layers overlap.

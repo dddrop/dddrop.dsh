@@ -1,9 +1,9 @@
 {
   "name": "@dddrop/dsh-plugin-theme-blue",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "A compact blue dark theme for the DeepSeek Harness Web interface.",
+  "description": "A compact blue Light and Dark theme layer for the DeepSeek Harness Web interface.",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
