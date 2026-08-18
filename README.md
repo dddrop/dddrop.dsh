@@ -21,7 +21,7 @@ Version-controlled DeepSeek Harness plugins, agent presets, related skills, and 
 
 ### Pavo
 
-`plugins/pavo` provides one shared, Git-backed Work board with Kanban and a Workflow-scoped dependency Flow Canvas. The canvas opens at a fixed Root Workflow and supports nested Workflow containers, breadcrumb navigation, Goal and Ongoing Works, arbitrary-precision WaterLevels, cyclic upstream relationships across Workflow boundaries, passive Agent tools, repository settings, and Project values. See `plugins/pavo/README.md` for the Work and Workflow models, architecture, compatibility, synchronization, and installation details.
+`plugins/pavo` provides one shared, Git-backed Work board with Kanban and a Workflow-scoped dependency Flow Canvas. The canvas opens at a fixed Root Workflow and supports nested Workflow containers, breadcrumb navigation, Goal and Ongoing Works, arbitrary-precision WaterLevels, cyclic upstream relationships across Workflow boundaries, a shared Work and Workflow Template Library, passive Agent tools, repository settings, and Project values. See `plugins/pavo/README.md` for the Work and Workflow models, architecture, compatibility, synchronization, and installation details.
 
 ## Requirements
 

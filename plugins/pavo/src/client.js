@@ -168,6 +168,17 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     '.pavo-drawer-id{overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;opacity:.68}',
     '.pavo-drawer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid rgba(128,128,128,.22);padding:14px 20px}',
     '.pavo-drawer-footer-end{display:flex;justify-content:flex-end;gap:8px;margin-left:auto}',
+    '.pavo-template-list{display:grid;gap:10px}',
+    '.pavo-template-row{display:grid;gap:10px;border:1px solid rgba(128,128,128,.24);border-radius:11px;padding:12px;background:rgba(128,128,128,.035)}',
+    '.pavo-template-row-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}',
+    '.pavo-template-row-title{display:grid;gap:3px;min-width:0}',
+    '.pavo-template-row-title strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}',
+    '.pavo-template-row-title span{font-size:10px;opacity:.56}',
+    '.pavo-template-kind{display:inline-flex;border-radius:999px;padding:3px 7px;background:rgba(118,86,181,.12);color:#7656b5;font-size:9px;font-weight:750;letter-spacing:.05em;text-transform:uppercase}',
+    '.pavo-template-row-actions{display:flex;flex-wrap:wrap;gap:6px}',
+    '.pavo-template-row-actions .pavo-button{min-height:30px;padding:3px 8px;font-size:10px}',
+    '.pavo-template-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}',
+    '.pavo-template-summary{border:1px solid rgba(118,86,181,.22);border-radius:10px;padding:10px;background:rgba(118,86,181,.055);font-size:11px;line-height:1.5}',
     '.pavo-settings{box-sizing:border-box;display:grid;align-content:start;gap:18px;width:min(680px,100%);padding:4px 2px 24px;color:inherit}',
     '.pavo-settings h2{margin:0;font-size:22px;letter-spacing:-.02em}',
     '.pavo-settings-copy{margin:-8px 0 0;font-size:13px;line-height:1.55;opacity:.68}',
@@ -261,6 +272,27 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       Object.values(draft.upstreamWaterLevels).every((value) =>
         WATER_LEVEL_PATTERN.test(value.trim()),
       )
+    )
+  }
+
+  function workMatchesDraft(work, draft) {
+    if (!work) return false
+    const fields = [
+      'type',
+      'project',
+      'workflowId',
+      'key',
+      'title',
+      'description',
+      'assignee',
+      'waterLevel',
+    ]
+    if (fields.some((name) => work[name] !== draft[name])) return false
+    const left = Object.entries(work.upstreamWaterLevels)
+    const right = Object.entries(draft.upstreamWaterLevels)
+    return (
+      left.length === right.length &&
+      left.every(([id, value]) => draft.upstreamWaterLevels[id] === value)
     )
   }
 
@@ -522,11 +554,13 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     onCreate,
     onSave,
     onRemove,
+    onSaveTemplate,
   }) {
     if (!mode) return null
     const creating = mode === 'create'
     if (!creating && !work) return null
     const valid = !stale && isValidDraft(draft)
+    const workIsSaved = creating || workMatchesDraft(work, draft)
     const column = work
       ? columns.find((candidate) => candidate.id === work.columnId)
       : undefined
@@ -690,6 +724,21 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                 'button',
                 {
                   type: 'button',
+                  className: 'pavo-button',
+                  disabled: busy || stale || !workIsSaved,
+                  title: workIsSaved
+                    ? 'Save the current Work as a reusable template.'
+                    : 'Save the Work changes before creating a template.',
+                  onClick: () => onSaveTemplate(work),
+                },
+                'Save as template',
+              )
+            : null,
+          !creating
+            ? React.createElement(
+                'button',
+                {
+                  type: 'button',
                   className: 'pavo-button pavo-button-danger',
                   disabled: busy || stale,
                   onClick: () => onRemove(work.id),
@@ -830,6 +879,692 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
             ),
           ),
         ),
+      ),
+    )
+  }
+
+  function templateCounts(template) {
+    if (template.kind === 'work') {
+      return { works: 1, workflows: 0, dependencies: 0 }
+    }
+    return {
+      works: template.content.works.length,
+      workflows:
+        template.content.workflows.length -
+        (template.content.mapRootToTarget ? 1 : 0),
+      dependencies: template.content.works.reduce(
+        (count, work) => count + Object.keys(work.upstreamWaterLevels).length,
+        0,
+      ),
+    }
+  }
+
+  let templateDraftIdSequence = 0
+
+  function templateDraftId(prefix) {
+    templateDraftIdSequence += 1
+    return `${prefix}-${Date.now().toString(36)}-${templateDraftIdSequence}`
+  }
+
+  function WorkflowTemplateEditor({ draft, setDraft, projects, columns, busy }) {
+    const content = draft.content
+    if (!content) return null
+    const setContent = (updater) =>
+      setDraft((current) => ({
+        ...current,
+        content: updater(current.content),
+      }))
+    const childIds = (workflowId) => {
+      const result = new Set([workflowId])
+      let changed = true
+      while (changed) {
+        changed = false
+        for (const workflow of content.workflows) {
+          if (workflow.parentWorkflowId && result.has(workflow.parentWorkflowId) && !result.has(workflow.id)) {
+            result.add(workflow.id)
+            changed = true
+          }
+        }
+      }
+      return result
+    }
+    const updateWorkflow = (workflowId, fieldName, value) =>
+      setContent((current) => ({
+        ...current,
+        workflows: current.workflows.map((workflow) =>
+          workflow.id === workflowId
+            ? { ...workflow, [fieldName]: value }
+            : workflow,
+        ),
+      }))
+    const addWorkflow = () => {
+      const id = templateDraftId('workflow')
+      setContent((current) => ({
+        ...current,
+        workflows: [
+          ...current.workflows,
+          {
+            id,
+            title: 'New Workflow',
+            parentWorkflowId: current.rootWorkflowId,
+          },
+        ],
+      }))
+    }
+    const removeWorkflow = (workflowId) =>
+      setContent((current) => ({
+        ...current,
+        workflows: current.workflows.filter((workflow) => workflow.id !== workflowId),
+      }))
+    const addTemplateWork = () => {
+      const id = templateDraftId('work')
+      setContent((current) => ({
+        ...current,
+        works: [
+          ...current.works,
+          {
+            id,
+            type: 'goal',
+            project: '',
+            key: '',
+            title: 'New Work',
+            description: '',
+            assignee: '',
+            waterLevel: '0',
+            upstreamWaterLevels: {},
+            workflowId: current.rootWorkflowId,
+            columnId: columns[0]?.id || '',
+          },
+        ],
+      }))
+    }
+    const updateTemplateWork = (workId, fieldName, value) =>
+      setContent((current) => ({
+        ...current,
+        works: current.works.map((work) =>
+          work.id === workId ? { ...work, [fieldName]: value } : work,
+        ),
+      }))
+    const removeTemplateWork = (workId) =>
+      setContent((current) => ({
+        ...current,
+        works: current.works
+          .filter((work) => work.id !== workId)
+          .map((work) => {
+            const upstreamWaterLevels = { ...work.upstreamWaterLevels }
+            delete upstreamWaterLevels[workId]
+            return { ...work, upstreamWaterLevels }
+          }),
+      }))
+    const updateTemplateDependency = (workId, upstreamId, checked, value) =>
+      setContent((current) => ({
+        ...current,
+        works: current.works.map((work) => {
+          if (work.id !== workId) return work
+          const upstreamWaterLevels = { ...work.upstreamWaterLevels }
+          if (checked) upstreamWaterLevels[upstreamId] = value ?? '0'
+          else delete upstreamWaterLevels[upstreamId]
+          return { ...work, upstreamWaterLevels }
+        }),
+      }))
+
+    return React.createElement(
+      React.Fragment,
+      null,
+      React.createElement(
+        'div',
+        { className: 'pavo-template-summary', 'data-testid': 'pavo-template-tree-editor' },
+        `${content.workflows.length} Workflows · ${content.works.length} Works. Internal dependency cycles are allowed.`,
+      ),
+      React.createElement(
+        'div',
+        { className: 'pavo-template-list' },
+        content.workflows.map((workflow) => {
+          const root = workflow.id === content.rootWorkflowId
+          const blockedRemoval =
+            root ||
+            content.workflows.some((item) => item.parentWorkflowId === workflow.id) ||
+            content.works.some((work) => work.workflowId === workflow.id)
+          const descendants = childIds(workflow.id)
+          return React.createElement(
+            'div',
+            { className: 'pavo-template-row', key: workflow.id },
+            React.createElement(
+              'div',
+              { className: 'pavo-template-row-head' },
+              React.createElement('span', { className: 'pavo-template-kind' }, root ? 'Template root' : 'Workflow'),
+              !root
+                ? React.createElement(
+                    'button',
+                    {
+                      type: 'button', className: 'pavo-button pavo-button-danger',
+                      disabled: busy || blockedRemoval,
+                      title: blockedRemoval ? 'Move or remove its contents first.' : 'Remove Workflow',
+                      onClick: () => removeWorkflow(workflow.id),
+                    },
+                    'Remove',
+                  )
+                : null,
+            ),
+            field('Title', React.createElement('input', {
+              className: 'pavo-input', value: workflow.title, disabled: busy,
+              maxLength: 500,
+              onChange: (event) => updateWorkflow(workflow.id, 'title', event.target.value),
+            })),
+            !root
+              ? field(
+                  'Parent Workflow',
+                  React.createElement(
+                    'select',
+                    {
+                      className: 'pavo-select', value: workflow.parentWorkflowId,
+                      disabled: busy,
+                      onChange: (event) => updateWorkflow(workflow.id, 'parentWorkflowId', event.target.value),
+                    },
+                    content.workflows
+                      .filter((candidate) => !descendants.has(candidate.id))
+                      .map((candidate) =>
+                        React.createElement('option', { key: candidate.id, value: candidate.id }, candidate.title),
+                      ),
+                  ),
+                )
+              : null,
+          )
+        }),
+      ),
+      React.createElement(
+        'button',
+        { type: 'button', className: 'pavo-button', disabled: busy, onClick: addWorkflow },
+        'Add child Workflow',
+      ),
+      content.works.length
+        ? React.createElement(
+            'div',
+            { className: 'pavo-template-list' },
+            content.works.map((work) =>
+              React.createElement(
+                'div',
+                { className: 'pavo-template-row', key: work.id },
+                React.createElement(
+                  'div',
+                  { className: 'pavo-template-row-head' },
+                  React.createElement('span', { className: 'pavo-template-kind' }, work.type === 'goal' ? 'Goal Work' : 'Ongoing Work'),
+                  React.createElement(
+                    'button',
+                    {
+                      type: 'button', className: 'pavo-button pavo-button-danger', disabled: busy,
+                      onClick: () => removeTemplateWork(work.id),
+                    },
+                    'Remove',
+                  ),
+                ),
+                field('Title', React.createElement('input', {
+                  className: 'pavo-input', value: work.title, disabled: busy, maxLength: 500,
+                  onChange: (event) => updateTemplateWork(work.id, 'title', event.target.value),
+                })),
+                React.createElement(
+                  'div',
+                  { className: 'pavo-drawer-grid' },
+                  field('Type', React.createElement(
+                    'select',
+                    {
+                      className: 'pavo-select', value: work.type, disabled: busy,
+                      onChange: (event) => updateTemplateWork(work.id, 'type', event.target.value),
+                    },
+                    React.createElement('option', { value: 'goal' }, 'Goal'),
+                    React.createElement('option', { value: 'ongoing' }, 'Ongoing'),
+                  )),
+                  field('Workflow', React.createElement(
+                    'select',
+                    {
+                      className: 'pavo-select', value: work.workflowId, disabled: busy,
+                      onChange: (event) => updateTemplateWork(work.id, 'workflowId', event.target.value),
+                    },
+                    content.workflows.map((candidate) =>
+                      React.createElement('option', { key: candidate.id, value: candidate.id }, candidate.title),
+                    ),
+                  )),
+                  field('Project', React.createElement(
+                    'select',
+                    {
+                      className: 'pavo-select', value: work.project, disabled: busy,
+                      onChange: (event) => updateTemplateWork(work.id, 'project', event.target.value),
+                    },
+                    projectOptions(projects),
+                  )),
+                  field('KEY', React.createElement('input', {
+                    className: 'pavo-input', value: work.key, disabled: busy, maxLength: 128,
+                    onChange: (event) => updateTemplateWork(work.id, 'key', event.target.value),
+                  })),
+                  field('Assignee', React.createElement('input', {
+                    className: 'pavo-input', value: work.assignee, disabled: busy, maxLength: 256,
+                    onChange: (event) => updateTemplateWork(work.id, 'assignee', event.target.value),
+                  })),
+                  field('WaterLevel', React.createElement('input', {
+                    className: 'pavo-input', value: work.waterLevel, disabled: busy, inputMode: 'decimal',
+                    onChange: (event) => updateTemplateWork(work.id, 'waterLevel', event.target.value),
+                  })),
+                  field('Column', React.createElement(
+                    'select',
+                    {
+                      className: 'pavo-select', value: work.columnId, disabled: busy,
+                      onChange: (event) => updateTemplateWork(work.id, 'columnId', event.target.value),
+                    },
+                    columns.map((column) =>
+                      React.createElement('option', { key: column.id, value: column.id }, column.title),
+                    ),
+                  )),
+                ),
+                field('Description', React.createElement('textarea', {
+                  className: 'pavo-textarea', value: work.description, disabled: busy, maxLength: 50000,
+                  onChange: (event) => updateTemplateWork(work.id, 'description', event.target.value),
+                })),
+                content.works.length > 1
+                  ? React.createElement(
+                      'div',
+                      { className: 'pavo-dependency-editor' },
+                      React.createElement('strong', null, 'Internal upstream Works'),
+                      content.works
+                        .filter((candidate) => candidate.id !== work.id)
+                        .map((candidate) => {
+                          const checked = Object.hasOwn(work.upstreamWaterLevels, candidate.id)
+                          return React.createElement(
+                            'div',
+                            { className: 'pavo-dependency-choice', key: candidate.id },
+                            React.createElement('input', {
+                              type: 'checkbox', checked, disabled: busy,
+                              onChange: (event) => updateTemplateDependency(work.id, candidate.id, event.target.checked, '0'),
+                            }),
+                            React.createElement('label', null, React.createElement('strong', null, candidate.title)),
+                            checked
+                              ? React.createElement('input', {
+                                  className: 'pavo-input', value: work.upstreamWaterLevels[candidate.id],
+                                  disabled: busy, inputMode: 'decimal',
+                                  'aria-label': `Acknowledged WaterLevel for ${candidate.title}`,
+                                  onChange: (event) => updateTemplateDependency(work.id, candidate.id, true, event.target.value),
+                                })
+                              : React.createElement('span', null),
+                          )
+                        }),
+                    )
+                  : null,
+              ),
+            ),
+          )
+        : null,
+      React.createElement(
+        'button',
+        { type: 'button', className: 'pavo-button', disabled: busy, onClick: addTemplateWork },
+        'Add Work',
+      ),
+    )
+  }
+
+  function TemplateLibraryDrawer({
+    mode,
+    templates,
+    projects,
+    columns,
+    workflows,
+    draft,
+    setDraft,
+    targetWorkflowId,
+    setTargetWorkflowId,
+    busy,
+    stale,
+    closeRef,
+    onClose,
+    onShowLibrary,
+    onCreate,
+    onEdit,
+    onApply,
+    onDelete,
+    onSave,
+    onInstantiate,
+  }) {
+    if (!mode) return null
+    const update = (name) => (event) =>
+      setDraft((current) => ({ ...current, [name]: event.target.value }))
+    const selected = templates.find((template) => template.id === draft?.templateId)
+    const editing = mode === 'template-edit'
+    const applying = mode === 'template-apply'
+    const title = editing
+      ? draft?.templateId
+        ? 'Edit template'
+        : draft?.sourceWorkId || draft?.sourceWorkflowId
+          ? 'Save as template'
+          : 'Create template'
+      : applying
+        ? 'Use template'
+        : 'Reusable structures'
+    const workEditor = editing && draft?.kind === 'work'
+    const workflowEditor = editing && draft?.kind === 'workflow'
+    const scratch = !draft?.sourceWorkId && !draft?.sourceWorkflowId
+    const workflowDraftValid =
+      !workflowEditor ||
+      !scratch ||
+      Boolean(
+        draft?.content?.workflows?.every((workflow) => workflow.title.trim()) &&
+          draft?.content?.works?.every(
+            (work) => work.title.trim() && /^\d+(?:\.\d+)?$/.test(work.waterLevel),
+          ),
+      )
+
+    return React.createElement(
+      'div',
+      {
+        className: 'pavo-drawer-backdrop',
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget) onClose()
+        },
+      },
+      React.createElement(
+        'aside',
+        {
+          className: 'pavo-drawer',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-labelledby': 'pavo-template-drawer-title',
+          'data-testid': 'pavo-template-library',
+        },
+        React.createElement(
+          'header',
+          { className: 'pavo-drawer-header' },
+          React.createElement(
+            'div',
+            { className: 'pavo-drawer-heading' },
+            React.createElement(
+              'span',
+              { className: 'pavo-drawer-eyebrow' },
+              'Template Library',
+            ),
+            React.createElement(
+              'h2',
+              { className: 'pavo-drawer-title', id: 'pavo-template-drawer-title' },
+              title,
+            ),
+          ),
+          React.createElement(
+            'button',
+            {
+              ref: closeRef,
+              type: 'button',
+              className: 'pavo-drawer-close',
+              disabled: busy,
+              onClick: onClose,
+            },
+            'Close',
+          ),
+        ),
+        React.createElement(
+          'div',
+          { className: 'pavo-drawer-content' },
+          stale
+            ? React.createElement(
+                'div',
+                { className: 'pavo-notice' },
+                'The board changed after the Template Library opened. Reopen it before saving.',
+              )
+            : null,
+          mode === 'template-library'
+            ? React.createElement(
+                React.Fragment,
+                null,
+                React.createElement(
+                  'div',
+                  { className: 'pavo-template-actions' },
+                  React.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'pavo-button',
+                      disabled: busy,
+                      onClick: () => onCreate('work'),
+                    },
+                    'New Work template',
+                  ),
+                  React.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'pavo-button',
+                      disabled: busy,
+                      onClick: () => onCreate('workflow'),
+                    },
+                    'New Workflow template',
+                  ),
+                ),
+                templates.length === 0
+                  ? React.createElement(
+                      'div',
+                      { className: 'pavo-flow-empty' },
+                      'No templates yet. Create one from scratch or save a current Work or Workflow subtree.',
+                    )
+                  : React.createElement(
+                      'div',
+                      { className: 'pavo-template-list' },
+                      templates.map((template) => {
+                        const counts = templateCounts(template)
+                        return React.createElement(
+                          'article',
+                          {
+                            className: 'pavo-template-row',
+                            key: template.id,
+                            'data-testid': 'pavo-template-row',
+                          },
+                          React.createElement(
+                            'div',
+                            { className: 'pavo-template-row-head' },
+                            React.createElement(
+                              'div',
+                              { className: 'pavo-template-row-title' },
+                              React.createElement('strong', null, template.name),
+                              React.createElement(
+                                'span',
+                                { 'data-testid': 'pavo-template-counts' },
+                                `${counts.workflows} Workflows · ${counts.works} Works · ${counts.dependencies} internal dependencies`,
+                              ),
+                            ),
+                            React.createElement(
+                              'span',
+                              { className: 'pavo-template-kind' },
+                              template.kind === 'work' ? 'Work' : 'Workflow subtree',
+                            ),
+                          ),
+                          template.excludedExternalDependencies > 0
+                            ? React.createElement(
+                                'div',
+                                { className: 'pavo-notice' },
+                                `${template.excludedExternalDependencies} external dependencies were excluded when captured.`,
+                              )
+                            : null,
+                          React.createElement(
+                            'div',
+                            { className: 'pavo-template-row-actions' },
+                            React.createElement(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'pavo-button pavo-button-primary',
+                                disabled: busy,
+                                onClick: () => onApply(template),
+                              },
+                              'Use',
+                            ),
+                            React.createElement(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'pavo-button',
+                                disabled: busy,
+                                onClick: () => onEdit(template),
+                              },
+                              'Edit',
+                            ),
+                            React.createElement(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'pavo-button pavo-button-danger',
+                                disabled: busy,
+                                onClick: () => onDelete(template.id),
+                              },
+                              'Delete',
+                            ),
+                          ),
+                        )
+                      }),
+                    ),
+              )
+            : editing
+              ? React.createElement(
+                  'div',
+                  { className: 'pavo-drawer-form', 'data-testid': 'pavo-template-editor' },
+                  field(
+                    'Template name',
+                    React.createElement('input', {
+                      className: 'pavo-input',
+                      value: draft.name,
+                      disabled: busy,
+                      maxLength: 500,
+                      onChange: update('name'),
+                    }),
+                  ),
+                  !scratch
+                    ? React.createElement(
+                        'div',
+                        { className: 'pavo-template-summary' },
+                        draft.sourceWorkId
+                          ? 'The current Work fields will be captured. External dependencies are excluded.'
+                          : 'The selected Workflow, all descendants, Works, and internal dependencies will be captured.',
+                      )
+                    : null,
+                  workEditor && scratch
+                    ? React.createElement(
+                        React.Fragment,
+                        null,
+                        field(
+                          'Work type',
+                          React.createElement(
+                            'select',
+                            {
+                              className: 'pavo-select',
+                              value: draft.type,
+                              disabled: busy,
+                              onChange: update('type'),
+                            },
+                            React.createElement('option', { value: 'goal' }, 'Goal Work'),
+                            React.createElement('option', { value: 'ongoing' }, 'Ongoing Work'),
+                          ),
+                        ),
+                        field(
+                          'Project',
+                          React.createElement(
+                            'select',
+                            {
+                              className: 'pavo-select',
+                              value: draft.project,
+                              disabled: busy,
+                              onChange: update('project'),
+                            },
+                            projectOptions(projects),
+                          ),
+                        ),
+                        field('KEY', React.createElement('input', {
+                          className: 'pavo-input', value: draft.key, disabled: busy,
+                          maxLength: 128, onChange: update('key'),
+                        })),
+                        field('Work title', React.createElement('input', {
+                          className: 'pavo-input', value: draft.title, disabled: busy,
+                          maxLength: 500, onChange: update('title'),
+                        })),
+                        field('Assignee', React.createElement('input', {
+                          className: 'pavo-input', value: draft.assignee, disabled: busy,
+                          maxLength: 256, onChange: update('assignee'),
+                        })),
+                        field('WaterLevel', React.createElement('input', {
+                          className: 'pavo-input', value: draft.waterLevel, disabled: busy,
+                          inputMode: 'decimal', onChange: update('waterLevel'),
+                        })),
+                        field(
+                          'Initial column',
+                          React.createElement(
+                            'select',
+                            {
+                              className: 'pavo-select', value: draft.columnId,
+                              disabled: busy, onChange: update('columnId'),
+                            },
+                            columns.map((column) =>
+                              React.createElement('option', { key: column.id, value: column.id }, column.title),
+                            ),
+                          ),
+                        ),
+                        field('Description', React.createElement('textarea', {
+                          className: 'pavo-textarea', value: draft.description,
+                          disabled: busy, maxLength: 50000, onChange: update('description'),
+                        })),
+                      )
+                    : null,
+                  workflowEditor && scratch
+                    ? React.createElement(WorkflowTemplateEditor, {
+                        draft,
+                        setDraft,
+                        projects,
+                        columns,
+                        busy,
+                      })
+                    : null,
+                )
+              : applying && selected
+                ? React.createElement(
+                    'div',
+                    { className: 'pavo-drawer-form', 'data-testid': 'pavo-template-instantiate' },
+                    React.createElement(
+                      'div',
+                      { className: 'pavo-template-summary', 'data-testid': 'pavo-template-preview' },
+                      `${selected.name} creates passive Pavo records only. It does not run Agents, update WaterLevels, or acknowledge dependencies.`,
+                    ),
+                    field(
+                      'Destination Workflow',
+                      React.createElement(
+                        'select',
+                        {
+                          className: 'pavo-select', value: targetWorkflowId,
+                          disabled: busy, onChange: (event) => setTargetWorkflowId(event.target.value),
+                          'data-testid': 'pavo-template-target-workflow',
+                        },
+                        workflowOptions(workflows),
+                      ),
+                    ),
+                  )
+                : null,
+        ),
+        mode === 'template-library'
+          ? null
+          : React.createElement(
+              'footer',
+              { className: 'pavo-drawer-footer' },
+              React.createElement(
+                'button',
+                { type: 'button', className: 'pavo-button', disabled: busy, onClick: onShowLibrary },
+                'Back to library',
+              ),
+              React.createElement(
+                'div',
+                { className: 'pavo-drawer-footer-end' },
+                React.createElement(
+                  'button',
+                  {
+                    type: 'button', className: 'pavo-button pavo-button-primary',
+                    disabled:
+                      busy || stale ||
+                      (editing && (!draft?.name?.trim() || (scratch && workEditor && !draft?.title?.trim()) || !workflowDraftValid)),
+                    onClick: applying ? onInstantiate : onSave,
+                  },
+                  applying ? 'Create from template' : 'Save template',
+                ),
+              ),
+            ),
       ),
     )
   }
@@ -1109,6 +1844,8 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     onOpenWorkflow,
     onEditWorkflow,
     onRemoveWorkflow,
+    onSaveWorkTemplate,
+    onSaveWorkflowTemplate,
     onUpdateDependencies,
     busy,
     layoutKey,
@@ -1363,6 +2100,16 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                   },
                   'Edit Work',
                 ),
+                React.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'pavo-button',
+                    disabled: busy,
+                    onClick: () => onSaveWorkTemplate(selected),
+                  },
+                  'Save as template',
+                ),
               ),
               React.createElement(
                 'div',
@@ -1511,6 +2258,16 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                     'button',
                     {
                       type: 'button',
+                      className: 'pavo-button',
+                      disabled: busy,
+                      onClick: () => onSaveWorkflowTemplate(selectedWorkflow),
+                    },
+                    'Save subtree as template',
+                  ),
+                  React.createElement(
+                    'button',
+                    {
+                      type: 'button',
                       className: 'pavo-button pavo-button-danger',
                       disabled: busy,
                       onClick: () => onRemoveWorkflow(selectedWorkflow.id),
@@ -1544,6 +2301,10 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     const [workflowDrawerId, setWorkflowDrawerId] = React.useState('')
     const [workflowDrawerTitle, setWorkflowDrawerTitle] = React.useState('')
     const [workflowDrawerRevision, setWorkflowDrawerRevision] = React.useState('')
+    const [templateDrawerMode, setTemplateDrawerMode] = React.useState('')
+    const [templateDrawerRevision, setTemplateDrawerRevision] = React.useState('')
+    const [templateDraft, setTemplateDraft] = React.useState(null)
+    const [templateTargetWorkflowId, setTemplateTargetWorkflowId] = React.useState(ROOT_WORKFLOW_ID)
     const [draggedWorkId, setDraggedWorkId] = React.useState('')
     const [snackbar, setSnackbar] = React.useState(null)
     const drawerCloseRef = React.useRef(null)
@@ -1660,11 +2421,12 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     }, [snackbar])
 
     React.useEffect(() => {
-      if (!drawerMode && !workflowDrawerMode) return undefined
+      if (!drawerMode && !workflowDrawerMode && !templateDrawerMode) return undefined
       drawerCloseRef.current?.focus()
       const handleDrawerKeyDown = (event) => {
         if (event.key === 'Escape' && !busyRef.current) {
-          if (workflowDrawerMode) closeWorkflowDrawer()
+          if (templateDrawerMode) closeTemplateDrawer()
+          else if (workflowDrawerMode) closeWorkflowDrawer()
           else closeDrawer()
           return
         }
@@ -1690,7 +2452,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       }
       document.addEventListener('keydown', handleDrawerKeyDown)
       return () => document.removeEventListener('keydown', handleDrawerKeyDown)
-    }, [drawerMode, workflowDrawerMode])
+    }, [drawerMode, workflowDrawerMode, templateDrawerMode])
 
     React.useEffect(() => {
       if (!drawerWorkId || !snapshot) return
@@ -1856,6 +2618,178 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       }
       setCurrentWorkflowId(workflowId)
       setSelectedFlowNodeId('')
+    }
+
+    function openTemplateLibrary() {
+      if (!snapshot) return
+      rememberFocus()
+      setTemplateDrawerRevision(snapshot.revision)
+      setTemplateTargetWorkflowId(currentWorkflowId)
+      setTemplateDraft(null)
+      setTemplateDrawerMode('template-library')
+    }
+
+    function openCreateTemplate(kind) {
+      if (!snapshot) return
+      setTemplateDraft(
+        kind === 'work'
+          ? {
+              kind: 'work',
+              name: '',
+              type: 'goal',
+              project: '',
+              key: '',
+              title: '',
+              description: '',
+              assignee: '',
+              waterLevel: '0',
+              columnId: snapshot.board.columns[0]?.id || '',
+            }
+          : {
+              kind: 'workflow',
+              name: '',
+              content: {
+                rootWorkflowId: 'root',
+                workflows: [
+                  { id: 'root', title: 'New Workflow', parentWorkflowId: null },
+                ],
+                works: [],
+              },
+            },
+      )
+      setTemplateDrawerMode('template-edit')
+    }
+
+    function openCaptureTemplate(kind, source) {
+      if (!snapshot || !source) return
+      rememberFocus()
+      setTemplateDrawerRevision(snapshot.revision)
+      setTemplateDraft({
+        kind,
+        name: source.title,
+        ...(kind === 'work'
+          ? { sourceWorkId: source.id }
+          : { sourceWorkflowId: source.id }),
+      })
+      setTemplateDrawerMode('template-edit')
+    }
+
+    function openEditTemplate(template) {
+      if (!template) return
+      if (template.kind === 'work') {
+        setTemplateDraft({
+          templateId: template.id,
+          kind: 'work',
+          name: template.name,
+          ...template.content,
+        })
+      } else {
+        setTemplateDraft({
+          templateId: template.id,
+          kind: 'workflow',
+          name: template.name,
+          content: template.content,
+        })
+      }
+      setTemplateDrawerMode('template-edit')
+    }
+
+    function openApplyTemplate(template) {
+      if (!template) return
+      setTemplateDraft({ templateId: template.id, kind: template.kind })
+      setTemplateTargetWorkflowId(currentWorkflowId)
+      setTemplateDrawerMode('template-apply')
+    }
+
+    function showTemplateLibrary() {
+      setTemplateDraft(null)
+      setTemplateDrawerMode('template-library')
+    }
+
+    function closeTemplateDrawer() {
+      if (busyRef.current) return
+      setTemplateDrawerMode('')
+      setTemplateDrawerRevision('')
+      setTemplateDraft(null)
+      lastFocusRef.current?.focus?.()
+      lastFocusRef.current = null
+    }
+
+    function templateContentFromDraft() {
+      if (templateDraft.kind === 'work') {
+        return {
+          type: templateDraft.type,
+          project: templateDraft.project,
+          key: templateDraft.key.trim(),
+          title: templateDraft.title.trim(),
+          description: templateDraft.description,
+          assignee: templateDraft.assignee.trim(),
+          waterLevel: templateDraft.waterLevel.trim(),
+          columnId: templateDraft.columnId,
+        }
+      }
+      return templateDraft.content
+    }
+
+    function saveTemplate() {
+      if (!snapshot || !templateDraft?.name?.trim()) return
+      const creating = !templateDraft.templateId
+      const args = {
+        name: templateDraft.name.trim(),
+        expectedRevision: templateDrawerRevision,
+        ...(creating
+          ? { kind: templateDraft.kind }
+          : { templateId: templateDraft.templateId }),
+        ...(templateDraft.sourceWorkId
+          ? { sourceWorkId: templateDraft.sourceWorkId }
+          : templateDraft.sourceWorkflowId
+            ? { sourceWorkflowId: templateDraft.sourceWorkflowId }
+            : { content: templateContentFromDraft() }),
+      }
+      void run(async () => {
+        const next = await request(
+          creating ? 'addTemplate' : 'updateTemplate',
+          args,
+        )
+        setTemplateDrawerRevision(next.revision)
+        return next
+      }).then((saved) => {
+        if (saved) showTemplateLibrary()
+      })
+    }
+
+    function deleteTemplate(templateId) {
+      if (!snapshot) return
+      if (
+        typeof window !== 'undefined' &&
+        typeof window.confirm === 'function' &&
+        !window.confirm('Delete this template? Existing Works and Workflows are not affected.')
+      ) {
+        return
+      }
+      void run(async () => {
+        const next = await request('removeTemplate', {
+          templateId,
+          expectedRevision: templateDrawerRevision,
+        })
+        setTemplateDrawerRevision(next.revision)
+        return next
+      })
+    }
+
+    function applySelectedTemplate() {
+      if (!snapshot || !templateDraft?.templateId) return
+      void run(async () => {
+        const next = await request('instantiateTemplate', {
+          templateId: templateDraft.templateId,
+          targetWorkflowId: templateTargetWorkflowId,
+          expectedRevision: templateDrawerRevision,
+        })
+        setTemplateDrawerRevision(next.revision)
+        return next
+      }).then((saved) => {
+        if (saved) showTemplateLibrary()
+      })
     }
 
     function addWork() {
@@ -2142,6 +3076,16 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               'Flow Canvas',
             ),
           ),
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'pavo-button',
+              disabled: busy,
+              onClick: openTemplateLibrary,
+            },
+            'Templates',
+          ),
           viewMode === 'flow'
             ? React.createElement(
                 'button',
@@ -2209,6 +3153,9 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               onOpenWorkflow: openWorkflow,
               onEditWorkflow: openEditWorkflowDrawer,
               onRemoveWorkflow: removeWorkflow,
+              onSaveWorkTemplate: (work) => openCaptureTemplate('work', work),
+              onSaveWorkflowTemplate: (workflow) =>
+                openCaptureTemplate('workflow', workflow),
               onUpdateDependencies: updateDependencies,
               busy,
             }),
@@ -2232,6 +3179,10 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         onCreate: addWork,
         onSave: saveDetails,
         onRemove: removeWork,
+        onSaveTemplate: (work) => {
+          closeDrawer()
+          openCaptureTemplate('work', work)
+        },
       }),
       React.createElement(WorkflowDrawer, {
         mode: workflowDrawerMode,
@@ -2248,6 +3199,30 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         onClose: closeWorkflowDrawer,
         onCreate: createWorkflow,
         onSave: saveWorkflow,
+      }),
+      React.createElement(TemplateLibraryDrawer, {
+        mode: templateDrawerMode,
+        templates: data.templates,
+        projects: data.projects,
+        columns: data.columns,
+        workflows: data.workflows,
+        draft: templateDraft,
+        setDraft: setTemplateDraft,
+        targetWorkflowId: templateTargetWorkflowId,
+        setTargetWorkflowId: setTemplateTargetWorkflowId,
+        busy,
+        stale: Boolean(
+          templateDrawerRevision && templateDrawerRevision !== snapshot.revision,
+        ),
+        closeRef: drawerCloseRef,
+        onClose: closeTemplateDrawer,
+        onShowLibrary: showTemplateLibrary,
+        onCreate: openCreateTemplate,
+        onEdit: openEditTemplate,
+        onApply: openApplyTemplate,
+        onDelete: deleteTemplate,
+        onSave: saveTemplate,
+        onInstantiate: applySelectedTemplate,
       }),
       snackbar
         ? React.createElement(

@@ -1,15 +1,21 @@
 import {
   ROOT_WORKFLOW_ID,
   addProject,
+  addTemplate,
   addWork,
   addWorkflow,
   compareWaterLevels,
+  instantiateTemplate,
   moveWork,
   removeProject,
+  removeTemplate,
   removeWork,
   removeWorkflow,
+  updateTemplate,
   updateWork,
   updateWorkflow,
+  workTemplateContentFromWork,
+  workflowTemplateContentFromWorkflow,
 } from './board.js'
 import { Config, RepositoryError } from './git-store.js'
 import { RepositoryController } from './repository-settings.js'
@@ -21,7 +27,7 @@ export { Config }
 
 const API_PATH = '/_dddrop/pavo'
 const LEGACY_API_PATH = '/_dddrop/kanban'
-const MAX_REQUEST_BYTES = 64 * 1024
+const MAX_REQUEST_BYTES = 1024 * 1024
 
 function compileToolSchema(specification) {
   if (!specification || typeof specification !== 'object') return specification
@@ -271,6 +277,44 @@ function mergedWorkInput(work, args) {
   }
 }
 
+function templateContentFromArgs(board, args, kind) {
+  if (kind === 'work') {
+    if (args.sourceWorkId !== undefined) {
+      const work = board.works.find((candidate) => candidate.id === args.sourceWorkId)
+      if (!work) throw new TypeError(`Unknown Work: ${args.sourceWorkId}`)
+      return {
+        content: workTemplateContentFromWork(work),
+        excludedExternalDependencies: Object.keys(work.upstreamWaterLevels).length,
+      }
+    }
+    return {
+      content: args.content,
+      excludedExternalDependencies: args.excludedExternalDependencies ?? 0,
+    }
+  }
+  if (kind === 'workflow') {
+    if (args.sourceWorkflowId !== undefined) {
+      return workflowTemplateContentFromWorkflow(board, args.sourceWorkflowId)
+    }
+    if (args.content !== undefined) {
+      return {
+        content: args.content,
+        excludedExternalDependencies: args.excludedExternalDependencies ?? 0,
+      }
+    }
+    const title = args.rootTitle ?? args.name
+    return {
+      content: {
+        rootWorkflowId: 'root',
+        workflows: [{ id: 'root', title, parentWorkflowId: null }],
+        works: [],
+      },
+      excludedExternalDependencies: 0,
+    }
+  }
+  throw new TypeError('Template kind must be work or workflow.')
+}
+
 async function dispatch(controller, request) {
   const body = await readJsonBody(request)
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
@@ -392,6 +436,95 @@ async function dispatch(controller, request) {
               board,
               { workflowId: args.workflowId },
               { workflow: controller.config.columns },
+            ),
+        }),
+        controller,
+      )
+    case 'addTemplate':
+      return publicSnapshot(
+        await controller.mutate({
+          ...mutationOptions,
+          commitMessage: 'feat(pavo): add template',
+          mutation: (board) => {
+            const kind = args.kind
+            const captured = templateContentFromArgs(board, args, kind)
+            return addTemplate(
+              board,
+              {
+                id: uuidv7(),
+                kind,
+                name: args.name,
+                ...captured,
+                createdAt: new Date().toISOString(),
+              },
+              { workflow: controller.config.columns },
+            )
+          },
+        }),
+        controller,
+      )
+    case 'updateTemplate':
+      return publicSnapshot(
+        await controller.mutate({
+          ...mutationOptions,
+          commitMessage: 'feat(pavo): update template',
+          mutation: (board) => {
+            const current = board.templates.find(
+              (template) => template.id === args.templateId,
+            )
+            if (!current) throw new TypeError(`Unknown template: ${args.templateId}`)
+            const replacesContent =
+              args.content !== undefined ||
+              args.sourceWorkId !== undefined ||
+              args.sourceWorkflowId !== undefined
+            const captured = replacesContent
+              ? templateContentFromArgs(board, args, current.kind)
+              : {}
+            return updateTemplate(
+              board,
+              {
+                templateId: current.id,
+                name: args.name,
+                ...captured,
+                updatedAt: new Date().toISOString(),
+              },
+              { workflow: controller.config.columns },
+            )
+          },
+        }),
+        controller,
+      )
+    case 'removeTemplate':
+      return publicSnapshot(
+        await controller.mutate({
+          ...mutationOptions,
+          commitMessage: 'feat(pavo): remove template',
+          mutation: (board) =>
+            removeTemplate(
+              board,
+              { templateId: args.templateId },
+              { workflow: controller.config.columns },
+            ),
+        }),
+        controller,
+      )
+    case 'instantiateTemplate':
+      return publicSnapshot(
+        await controller.mutate({
+          ...mutationOptions,
+          commitMessage: 'feat(pavo): instantiate template',
+          mutation: (board) =>
+            instantiateTemplate(
+              board,
+              {
+                templateId: args.templateId,
+                targetWorkflowId: args.targetWorkflowId ?? ROOT_WORKFLOW_ID,
+              },
+              {
+                workflow: controller.config.columns,
+                idFactory: uuidv7,
+                now: new Date().toISOString(),
+              },
             ),
         }),
         controller,
@@ -639,6 +772,32 @@ const WORK_SCHEMA = {
     createdAt: { type: 'string', required: true },
     updatedAt: { type: 'string', required: true },
   },
+}
+
+const TEMPLATE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    kind: { type: 'string', enum: ['work', 'workflow'], required: true },
+    name: { type: 'string', required: true },
+    content: { type: 'object', required: true },
+    excludedExternalDependencies: { type: 'integer', required: true },
+    createdAt: { type: 'string', required: true },
+    updatedAt: { type: 'string', required: true },
+  },
+}
+
+function templateView(template) {
+  return {
+    id: template.id,
+    kind: template.kind,
+    name: template.name,
+    content: template.content,
+    excludedExternalDependencies: template.excludedExternalDependencies,
+    createdAt: template.createdAt,
+    updatedAt: template.updatedAt,
+  }
 }
 
 function requireToolWork(board, workId) {
@@ -1071,7 +1230,271 @@ function registerAgentTools(ctx, controller) {
     }),
   })
 
-  for (const tool of [listTool, readTool, updateTool, updateWorkflowTool]) {
+  const listTemplatesTool = defineTool({
+    name: 'pavo_list_templates',
+    description:
+      'List reusable Pavo Work and Workflow templates. Templates are passive records and never execute or schedule Works.',
+    parameters: {
+      kind: { type: 'string', enum: ['work', 'workflow'] },
+      query: { type: 'string' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          revision: { type: 'string', required: true },
+          templates: { type: 'array', required: true, items: TEMPLATE_SCHEMA },
+          total: { type: 'integer', required: true },
+        },
+      },
+      render: (_args, value) => renderToolValue('Pavo Template Library', value),
+    },
+    async execute(args) {
+      const snapshot = await controller.overview()
+      const query = args.query?.toLocaleLowerCase('en-US')
+      const templates = snapshot.board.templates.filter((template) => {
+        if (args.kind !== undefined && template.kind !== args.kind) return false
+        return !query || template.name.toLocaleLowerCase('en-US').includes(query)
+      })
+      return {
+        revision: snapshot.revision,
+        templates: templates.map(templateView),
+        total: templates.length,
+      }
+    },
+    presentCall: () => ({
+      card: 'generic',
+      title: 'List Pavo Templates',
+      kind: 'read',
+    }),
+  })
+
+  const updateTemplateTool = defineTool({
+    name: 'pavo_update_template',
+    description:
+      'Create, edit, refresh, or delete a passive Pavo Work or Workflow template using an exact revision. Captured external dependencies are excluded.',
+    parameters: {
+      action: {
+        type: 'string',
+        enum: ['create', 'edit', 'delete'],
+        required: true,
+      },
+      expectedRevision: { type: 'string', required: true },
+      templateId: { type: 'string' },
+      kind: { type: 'string', enum: ['work', 'workflow'] },
+      name: { type: 'string' },
+      sourceWorkId: { type: 'string' },
+      sourceWorkflowId: { type: 'string' },
+      rootTitle: { type: 'string' },
+      content: { type: 'object' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', required: true },
+          previousRevision: { type: 'string', required: true },
+          revision: { type: 'string', required: true },
+          template: TEMPLATE_SCHEMA,
+          deletedTemplateId: { type: 'string' },
+        },
+      },
+      render: (_args, value) => renderToolValue('Pavo Template mutation', value),
+    },
+    async execute(args) {
+      if (args.action === 'create') {
+        if (!['work', 'workflow'].includes(args.kind)) {
+          throw new TypeError('kind is required when creating a template.')
+        }
+        if (typeof args.name !== 'string' || args.name.trim().length === 0) {
+          throw new TypeError('name is required when creating a template.')
+        }
+      } else if (
+        typeof args.templateId !== 'string' ||
+        args.templateId.trim().length === 0
+      ) {
+        throw new TypeError(`templateId is required for the ${args.action} action.`)
+      }
+      if (args.action === 'edit' && ![
+        args.name,
+        args.content,
+        args.sourceWorkId,
+        args.sourceWorkflowId,
+      ].some((value) => value !== undefined)) {
+        throw new TypeError('The edit action requires a name or replacement content.')
+      }
+      if (args.action === 'delete' && [
+        args.kind,
+        args.name,
+        args.content,
+        args.sourceWorkId,
+        args.sourceWorkflowId,
+        args.rootTitle,
+      ].some((value) => value !== undefined)) {
+        throw new TypeError('delete accepts only templateId and expectedRevision.')
+      }
+
+      const now = new Date().toISOString()
+      let targetTemplateId = args.templateId
+      const snapshot = await controller.mutate({
+        expectedRevision: args.expectedRevision,
+        commitMessage: `feat(pavo): ${args.action} template`,
+        mutation: (board) => {
+          if (args.action === 'delete') {
+            return removeTemplate(
+              board,
+              { templateId: args.templateId },
+              { workflow: controller.config.columns },
+            )
+          }
+          if (args.action === 'create') {
+            targetTemplateId = uuidv7()
+            const captured = templateContentFromArgs(board, args, args.kind)
+            return addTemplate(
+              board,
+              {
+                id: targetTemplateId,
+                kind: args.kind,
+                name: args.name,
+                ...captured,
+                createdAt: now,
+              },
+              { workflow: controller.config.columns },
+            )
+          }
+          const current = board.templates.find(
+            (template) => template.id === args.templateId,
+          )
+          if (!current) throw new TypeError(`Unknown template: ${args.templateId}`)
+          const replacesContent =
+            args.content !== undefined ||
+            args.sourceWorkId !== undefined ||
+            args.sourceWorkflowId !== undefined
+          return updateTemplate(
+            board,
+            {
+              templateId: current.id,
+              name: args.name,
+              ...(replacesContent
+                ? templateContentFromArgs(board, args, current.kind)
+                : {}),
+              updatedAt: now,
+            },
+            { workflow: controller.config.columns },
+          )
+        },
+      })
+      return {
+        action: args.action,
+        previousRevision: args.expectedRevision,
+        revision: snapshot.revision,
+        ...(args.action === 'delete'
+          ? { deletedTemplateId: targetTemplateId }
+          : {
+              template: templateView(
+                snapshot.board.templates.find(
+                  (template) => template.id === targetTemplateId,
+                ),
+              ),
+            }),
+      }
+    },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: `${args.action} Pavo Template`,
+      kind: args.action === 'delete' ? 'delete' : 'other',
+      rawInput: args.templateId ?? args.name,
+    }),
+  })
+
+  const applyTemplateTool = defineTool({
+    name: 'pavo_apply_template',
+    description:
+      'Instantiate one Pavo template under an explicit target Workflow using fresh IDs. This only creates passive records; it never executes Works, schedules Agents, changes WaterLevels, or acknowledges dependencies.',
+    parameters: {
+      expectedRevision: { type: 'string', required: true },
+      templateId: { type: 'string', required: true },
+      targetWorkflowId: { type: 'string', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          previousRevision: { type: 'string', required: true },
+          revision: { type: 'string', required: true },
+          templateId: { type: 'string', required: true },
+          createdWorkIds: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+          },
+          createdWorkflowIds: {
+            type: 'array',
+            required: true,
+            items: { type: 'string' },
+          },
+        },
+      },
+      render: (_args, value) => renderToolValue('Pavo Template instance', value),
+    },
+    async execute(args) {
+      let createdWorkIds = []
+      let createdWorkflowIds = []
+      const snapshot = await controller.mutate({
+        expectedRevision: args.expectedRevision,
+        commitMessage: 'feat(pavo): instantiate template',
+        mutation: (board) => {
+          const workIds = new Set(board.works.map((work) => work.id))
+          const workflowIds = new Set(board.workflows.map((item) => item.id))
+          const next = instantiateTemplate(
+            board,
+            {
+              templateId: args.templateId,
+              targetWorkflowId: args.targetWorkflowId,
+            },
+            {
+              workflow: controller.config.columns,
+              idFactory: uuidv7,
+              now: new Date().toISOString(),
+            },
+          )
+          createdWorkIds = next.works
+            .filter((work) => !workIds.has(work.id))
+            .map((work) => work.id)
+          createdWorkflowIds = next.workflows
+            .filter((item) => !workflowIds.has(item.id))
+            .map((item) => item.id)
+          return next
+        },
+      })
+      return {
+        previousRevision: args.expectedRevision,
+        revision: snapshot.revision,
+        templateId: args.templateId,
+        createdWorkIds,
+        createdWorkflowIds,
+      }
+    },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: 'Apply Pavo Template',
+      kind: 'other',
+      rawInput: args.templateId,
+    }),
+  })
+
+  for (const tool of [
+    listTool,
+    readTool,
+    updateTool,
+    updateWorkflowTool,
+    listTemplatesTool,
+    updateTemplateTool,
+    applyTemplateTool,
+  ]) {
     ctx.effect(() => tools.register(tool))
   }
 }

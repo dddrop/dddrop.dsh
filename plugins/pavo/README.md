@@ -15,8 +15,9 @@ Pavo is a Git-backed Work board and dependency canvas for the DeepSeek Harness W
 - Stores dependency relationships and acknowledged upstream versions in each downstream Work's `upstreamWaterLevels` dictionary.
 - Allows directed cycles and bidirectional dependencies. Pavo does not schedule, propagate, increment WaterLevels, terminate loops, or acknowledge upstream versions automatically.
 - Uses one global board shared by every DSH workspace and session.
-- Creates one semantic Git commit for every Work, Workflow, or Project mutation.
-- Uses process-monotonic UUIDv7 IDs as immutable Work and Workflow identities.
+- Creates one semantic Git commit for every Work, Workflow, Template, or Project mutation.
+- Provides a shared Git-backed Template Library for reusable Work records and complete nested Workflow subtrees.
+- Uses process-monotonic UUIDv7 IDs as immutable Work, Workflow, and Template identities.
 - Adds a `Pavo` Settings page for repository and Project configuration.
 
 The Flow Canvas is a hierarchical dependency view powered by `@xyflow/react`. The fixed Root Workflow is the initial scope and is never rendered as a removable node. Each scope displays its direct Works and child Workflows. Double-click a Workflow to enter it and use the breadcrumb path to return to an ancestor. Workflow nodes have no dependency handles. Drag from an upstream Work's handle to a downstream Work in the same visible scope to add a dependency. Cross-Workflow dependencies remain valid and visible in the Work inspector even when both endpoints are not rendered together. The inspector can acknowledge the upstream Work's current WaterLevel or remove the relationship. Node positions are browser-only exploratory state, namespaced by repository and Workflow; Pavo does not duplicate dependency data outside the downstream Work.
@@ -75,14 +76,25 @@ WaterLevels are canonical non-negative decimal strings with arbitrary precision.
 
 Pavo is deliberately passive. An Agent reads a Work and its upstream context, executes the Description according to its own judgment, and explicitly edits the Work. The Agent may change the Description, type, status column, WaterLevel, dependency dictionary, or other editable fields. Pavo does not infer any of these updates from execution output.
 
+## Template Library
+
+The Template Library is available from both Board and Flow Canvas. A Work template stores reusable Work content without a destination Workflow or dependencies. A Workflow template stores one complete Workflow subtree, all of its Works, their Workflow membership, and dependencies whose endpoints are both inside the captured subtree. Dependencies that point to Works outside a captured source are explicitly excluded and counted on the template.
+
+Templates may be created from scratch, captured from an existing Work or Workflow, renamed, edited, deleted, and instantiated under an explicit destination Workflow. Instantiation is one optimistic Git mutation. It creates fresh UUIDv7 IDs for every Work and Workflow, remaps parent links and internal dependency keys atomically, and copies acknowledged WaterLevel strings exactly. A normal Workflow template's local root becomes a new child of the selected destination. When the fixed Root Workflow itself is captured, that local root is virtual and maps directly to the destination, so Pavo never creates a duplicate Root container.
+
+Templates remain passive data. Creating or instantiating one never executes an Agent, schedules Work, infers status, changes a WaterLevel, acknowledges an upstream version, or propagates a dependency. Template Project and column values must still exist when the template is normalized or instantiated. A configured Project cannot be removed while a Work or template references it.
+
 ## Agent tools
 
-When the Host provides the optional `tools` Service, Pavo registers four global tools backed by the same `RepositoryController` as the browser API:
+When the Host provides the optional `tools` Service, Pavo registers seven global tools backed by the same `RepositoryController` as the browser API:
 
 - `pavo_list_works`: lists Works, Workflow containers, status columns, and the current board revision; it can filter exact Workflow membership.
 - `pavo_read_work`: reads one Work, its Description, upstream context, and Root-to-Work Workflow path.
 - `pavo_update_work`: explicitly creates, edits, moves, or deletes one Work, including explicit Workflow assignment.
 - `pavo_update_workflow`: explicitly creates, renames, moves, or deletes one Workflow container.
+- `pavo_list_templates`: lists reusable Work and Workflow templates and their exact persisted content.
+- `pavo_update_template`: explicitly creates, edits, refreshes from a current source, or deletes one template.
+- `pavo_apply_template`: instantiates one template under an explicit destination Workflow with fresh IDs and remapped internal references.
 
 Every mutation requires the exact revision returned by a recent read. Pavo does not automatically retry a stale mutation because the Agent must reconsider its intent against the latest Work state.
 
@@ -98,16 +110,16 @@ Pavo intentionally keeps the default `dataDirectory` as `kanban` and the existin
     └── ...
 ```
 
-`board.json` storage version 5 contains Project names, columns, the flat parent-linked Workflow table, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 4 and contain `id`, `type`, `project`, `key`, `title`, `description`, `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps.
+`board.json` storage version 6 contains Project names, columns, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 4 and contain `id`, `type`, `project`, `key`, `title`, `description`, `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps.
 
 The reader remains compatible with:
 
 - Combined legacy `board.json` files with `cards` and `body`.
 - Split board versions 2 and 3 with `tickets` placements.
-- Split board version 4 with `works` placements.
+- Split board versions 4 and 5 with `works` placements.
 - Ticket versions 1 through 3.
 
-Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, and data without Workflow membership is assigned to the synthesized Root Workflow. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `refactor(pavo): add root workflow containers` when write policy permits it.
+Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, and data without Workflow membership is assigned to the synthesized Root Workflow. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `refactor(pavo): add template library` when write policy permits it.
 
 The Host keeps `/_dddrop/kanban` and the browser snapshot's derived `cards` alias for already-loaded legacy clients. Canonical storage and current clients use Works.
 
@@ -178,7 +190,7 @@ Every new Work requires a non-empty `Title`, `type`, and an existing `workflowId
 
 Every non-root Workflow requires a non-empty title and an existing parent Workflow. Pavo generates its immutable ID. Explicit reparenting is allowed only when it preserves a rooted, acyclic hierarchy. Work dependency cycles remain valid across Workflow boundaries because the Workflow hierarchy and Work dependency graph are separate structures.
 
-Project names are persisted in `board.json`, participate in the same revision and Git synchronization protocol as Works, and become optional values in Work forms. A configured Project referenced by a Work cannot be removed. `KEY` is optional, user-defined, and need not be unique because `ID` is canonical.
+Project names are persisted in `board.json`, participate in the same revision and Git synchronization protocol as Works, and become optional values in Work forms. A configured Project referenced by a Work or template cannot be removed. `KEY` is optional, user-defined, and need not be unique because `ID` is canonical.
 
 ## Git synchronization
 
@@ -211,7 +223,7 @@ Restart DSH Web after Host plugin or profile changes. The running Web process do
 ## Security boundaries
 
 - The endpoint uses a dedicated path outside DSH-owned `/api` and `/plugins` prefixes.
-- It accepts JSON `POST` requests only, limits request bodies to 64 KiB, and requires same-origin access from a trusted Host. Repository changes additionally require browser same-origin Fetch Metadata headers.
+- It accepts JSON `POST` requests only, limits request bodies to 1 MiB, and requires same-origin access from a trusted Host. Repository changes additionally require browser same-origin Fetch Metadata headers.
 - DSH and Pavo are local-user applications: another process running as the same OS account is inside the trust boundary.
 - Repository settings are a code-execution trust boundary: Git configuration, credential helpers, transports, and content filters may execute programs.
 - Candidate repository settings receive read-only validation before activation and are persisted with owner-only file permissions where supported.

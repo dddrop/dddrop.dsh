@@ -1,9 +1,9 @@
 {
   "name": "@dddrop/dsh-plugin-pavo",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
-  "description": "A Git-backed Work board and nested Workflow canvas for the DeepSeek Harness Web interface.",
+  "description": "A Git-backed Work board, nested Workflow canvas, and reusable Template Library for the DeepSeek Harness Web interface.",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",

@@ -5,18 +5,24 @@ import {
   DEFAULT_WORKFLOW,
   ROOT_WORKFLOW_ID,
   addProject,
+  addTemplate,
   addWork,
   addWorkflow,
   compareWaterLevels,
   createDefaultBoard,
+  instantiateTemplate,
   moveWork,
   normalizeBoard,
   normalizeWorkflow,
   removeProject,
+  removeTemplate,
   removeWork,
   removeWorkflow,
+  updateTemplate,
   updateWork,
   updateWorkflow,
+  workTemplateContentFromWork,
+  workflowTemplateContentFromWorkflow,
 } from '../src/board.js'
 import { Config, inject, name } from '../src/index.js'
 import { createUuidV7Generator } from '../src/uuid-v7.js'
@@ -345,6 +351,222 @@ test('rejects invalid Workflow trees and protects the fixed Root Workflow', () =
       ),
     }),
     /Root Workflow title and parent are fixed/,
+  )
+})
+
+test('creates, edits, applies, and removes a Work template', () => {
+  const board = createBoard()
+  const source = board.works[0]
+  const withTemplate = addTemplate(board, {
+    id: 'template-work',
+    kind: 'work',
+    name: 'Welcome template',
+    content: workTemplateContentFromWork(source),
+    excludedExternalDependencies: 0,
+    createdAt: fixedTime,
+  })
+  assert.equal(board.templates.length, 0)
+  assert.equal(withTemplate.templates[0].content.title, source.title)
+  assert.equal(withTemplate.templates[0].content.workflowId, undefined)
+  assert.equal(withTemplate.templates[0].content.upstreamWaterLevels, undefined)
+
+  const renamed = updateTemplate(withTemplate, {
+    templateId: 'template-work',
+    name: 'Reusable welcome Work',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+  })
+  const instantiated = instantiateTemplate(
+    renamed,
+    { templateId: 'template-work', targetWorkflowId: ROOT_WORKFLOW_ID },
+    {
+      workflow: DEFAULT_WORKFLOW,
+      idFactory: () => 'instantiated-work',
+      now: '2026-01-03T00:00:00.000Z',
+    },
+  )
+  const created = instantiated.works.find(
+    (work) => work.id === 'instantiated-work',
+  )
+  assert.equal(created.title, source.title)
+  assert.equal(created.workflowId, ROOT_WORKFLOW_ID)
+  assert.deepEqual(created.upstreamWaterLevels, {})
+  assert.equal(removeTemplate(instantiated, { templateId: 'template-work' }).templates.length, 0)
+})
+
+test('captures and instantiates nested Workflow templates with remapped cycles', () => {
+  const base = normalizeBoard({
+    ...createBoard(),
+    workflows: [
+      ...createBoard().workflows,
+      {
+        id: 'release',
+        title: 'Release',
+        parentWorkflowId: ROOT_WORKFLOW_ID,
+        createdAt: fixedTime,
+        updatedAt: fixedTime,
+      },
+      {
+        id: 'client',
+        title: 'Client',
+        parentWorkflowId: 'release',
+        createdAt: fixedTime,
+        updatedAt: fixedTime,
+      },
+    ],
+    works: [
+      {
+        ...workInput({
+          id: 'code',
+          key: 'CODE',
+          title: 'Code',
+          workflowId: 'release',
+          upstreamWaterLevels: { review: '2', 'welcome-work': '0' },
+        }),
+      },
+      {
+        ...workInput({
+          id: 'review',
+          key: 'REVIEW',
+          title: 'Review',
+          workflowId: 'client',
+          upstreamWaterLevels: { code: '1' },
+        }),
+      },
+      createBoard().works[0],
+    ],
+  })
+  const captured = workflowTemplateContentFromWorkflow(base, 'release')
+  assert.equal(captured.content.mapRootToTarget, false)
+  assert.equal(captured.content.workflows.length, 2)
+  assert.equal(captured.content.works.length, 2)
+  assert.equal(captured.excludedExternalDependencies, 1)
+  assert.deepEqual(
+    captured.content.works.find((work) => work.id === 'code').upstreamWaterLevels,
+    { review: '2' },
+  )
+
+  const templated = addTemplate(base, {
+    id: 'template-release',
+    kind: 'workflow',
+    name: 'Release flow',
+    ...captured,
+    createdAt: fixedTime,
+  })
+  const ids = ['new-release', 'new-client', 'new-code', 'new-review']
+  const instantiated = instantiateTemplate(
+    templated,
+    {
+      templateId: 'template-release',
+      targetWorkflowId: ROOT_WORKFLOW_ID,
+    },
+    {
+      workflow: DEFAULT_WORKFLOW,
+      idFactory: () => ids.shift(),
+      now: '2026-01-04T00:00:00.000Z',
+    },
+  )
+  assert.equal(
+    instantiated.workflows.find((item) => item.id === 'new-release').parentWorkflowId,
+    ROOT_WORKFLOW_ID,
+  )
+  assert.equal(
+    instantiated.workflows.find((item) => item.id === 'new-client').parentWorkflowId,
+    'new-release',
+  )
+  assert.deepEqual(
+    instantiated.works.find((work) => work.id === 'new-code').upstreamWaterLevels,
+    { 'new-review': '2' },
+  )
+  assert.deepEqual(
+    instantiated.works.find((work) => work.id === 'new-review').upstreamWaterLevels,
+    { 'new-code': '1' },
+  )
+})
+
+test('maps a captured fixed Root Workflow directly to the destination', () => {
+  const source = addWorkflow(createBoard(), {
+    id: 'child',
+    title: 'Child',
+    parentWorkflowId: ROOT_WORKFLOW_ID,
+    createdAt: fixedTime,
+  })
+  const captured = workflowTemplateContentFromWorkflow(
+    source,
+    ROOT_WORKFLOW_ID,
+  )
+  assert.equal(captured.content.mapRootToTarget, true)
+  const templated = addTemplate(source, {
+    id: 'root-template',
+    kind: 'workflow',
+    name: 'Whole board',
+    ...captured,
+    createdAt: fixedTime,
+  })
+  const ids = ['new-child', 'new-root-work']
+  const instantiated = instantiateTemplate(
+    templated,
+    { templateId: 'root-template', targetWorkflowId: ROOT_WORKFLOW_ID },
+    {
+      workflow: DEFAULT_WORKFLOW,
+      idFactory: () => ids.shift(),
+      now: '2026-01-05T00:00:00.000Z',
+    },
+  )
+  assert.equal(
+    instantiated.workflows.filter((workflow) => workflow.title === 'Root Workflow').length,
+    1,
+  )
+  assert.equal(
+    instantiated.workflows.find((workflow) => workflow.id === 'new-child').parentWorkflowId,
+    ROOT_WORKFLOW_ID,
+  )
+  assert.equal(
+    instantiated.works.find((work) => work.id === 'new-root-work').workflowId,
+    ROOT_WORKFLOW_ID,
+  )
+})
+
+test('rejects malformed templates and protects configured Projects they use', () => {
+  assert.throws(
+    () => addTemplate(createBoard(), {
+      id: 'bad',
+      kind: 'workflow',
+      name: 'Bad tree',
+      content: {
+        rootWorkflowId: 'a',
+        workflows: [
+          { id: 'a', title: 'A', parentWorkflowId: 'b' },
+          { id: 'b', title: 'B', parentWorkflowId: 'a' },
+        ],
+        works: [],
+      },
+    }),
+    /rootWorkflowId must identify the only parentless Workflow|parent cycle/,
+  )
+  const withTemplate = addTemplate(createBoard(), {
+    id: 'project-template',
+    kind: 'work',
+    name: 'Harness Work',
+    content: workTemplateContentFromWork(createBoard().works[0]),
+  })
+  const populated = updateTemplate(withTemplate, {
+    templateId: 'project-template',
+    content: {
+      ...withTemplate.templates[0].content,
+      project: 'Harness',
+    },
+  })
+  assert.throws(
+    () => removeProject(populated, { project: 'Harness' }),
+    /still used by one or more templates/,
+  )
+  assert.throws(
+    () => instantiateTemplate(
+      populated,
+      { templateId: 'project-template', targetWorkflowId: 'missing' },
+      { idFactory: () => 'unused' },
+    ),
+    /Unknown target Workflow/,
   )
 })
 

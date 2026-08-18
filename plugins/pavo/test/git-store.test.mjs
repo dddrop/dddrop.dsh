@@ -17,11 +17,13 @@ import { promisify } from 'node:util'
 import {
   ROOT_WORKFLOW_ID,
   addProject,
+  addTemplate,
   addWork,
   addWorkflow,
   createDefaultBoard,
   removeWork,
   updateWork,
+  workTemplateContentFromWork,
 } from '../src/board.js'
 import {
   GitBoardRepository,
@@ -460,7 +462,7 @@ test('migrates a legacy combined board into split ticket files once', async () =
         'utf8',
       ),
     )
-    assert.equal(boardDocument.version, 5)
+    assert.equal(boardDocument.version, 6)
     assert.deepEqual(boardDocument.projects, [])
     assert.equal(boardDocument.cards, undefined)
     assert.equal(boardDocument.tickets, undefined)
@@ -473,7 +475,7 @@ test('migrates a legacy combined board into split ticket files once', async () =
     assert.equal(ticketDocument.waterLevel, '0')
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'refactor(pavo): add root workflow containers',
+      'refactor(pavo): add template library',
     )
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
 
@@ -515,11 +517,78 @@ test('migrates an empty version 4 board without a tracked tickets path', async (
     assert.equal(migrated.board.works.length, 0)
     assert.equal(migrated.board.workflows[0].id, ROOT_WORKFLOW_ID)
     const currentDocument = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(currentDocument.version, 5)
+    assert.equal(currentDocument.version, 6)
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'refactor(pavo): add root workflow containers',
+      'refactor(pavo): add template library',
     )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('migrates version 5 Work placements into template storage', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-v5-migration-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    const writer = new GitBoardRepository(config)
+    const initial = await writer.overview()
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const legacy = JSON.parse(await readFile(boardPath, 'utf8'))
+    legacy.version = 5
+    delete legacy.templates
+    await writeFile(boardPath, `${JSON.stringify(legacy, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json')
+    await git(root, 'commit', '-m', 'test: prepare version 5 board')
+
+    const migrated = await new GitBoardRepository(config).overview()
+    assert.equal(migrated.board.works.length, initial.board.works.length)
+    assert.deepEqual(migrated.board.templates, [])
+    const current = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(current.version, 6)
+    assert.deepEqual(current.templates, [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('persists the shared template library in board storage', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-templates-'))
+  try {
+    const repository = new GitBoardRepository({
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    })
+    const initial = await repository.overview()
+    const saved = await repository.mutate({
+      expectedRevision: initial.revision,
+      commitMessage: 'feat(pavo): add template',
+      mutation: (board) =>
+        addTemplate(board, {
+          id: 'welcome-template',
+          kind: 'work',
+          name: 'Welcome Work',
+          content: workTemplateContentFromWork(board.works[0]),
+          createdAt: '2026-01-01T00:00:00.000Z',
+        }),
+    })
+    assert.equal(saved.board.templates.length, 1)
+    const reloaded = await new GitBoardRepository(repository.config).overview()
+    assert.equal(reloaded.revision, saved.revision)
+    assert.equal(reloaded.board.templates[0].name, 'Welcome Work')
+    const document = JSON.parse(
+      await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
+    )
+    assert.equal(document.version, 6)
+    assert.equal(document.templates[0].id, 'welcome-template')
+    assert.equal(document.templates[0].content.workflowId, undefined)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -569,7 +638,7 @@ test('persists nested Workflows and Work membership in current storage', async (
     const ticketDocument = JSON.parse(
       await readFile(path.join(root, 'kanban', 'tickets', 'release-work.json'), 'utf8'),
     )
-    assert.equal(boardDocument.version, 5)
+    assert.equal(boardDocument.version, 6)
     assert.equal(boardDocument.workflows[0].id, ROOT_WORKFLOW_ID)
     assert.equal(ticketDocument.version, 4)
     assert.equal(ticketDocument.workflowId, 'release')

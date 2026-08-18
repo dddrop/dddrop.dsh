@@ -27,12 +27,14 @@ export const DEFAULT_WORKFLOW = Object.freeze([
 ])
 
 export const WORK_TYPES = Object.freeze(['goal', 'ongoing'])
+export const TEMPLATE_KINDS = Object.freeze(['work', 'workflow'])
 export const ROOT_WORKFLOW_ID = 'root'
 export const ROOT_WORKFLOW_TITLE = 'Root Workflow'
 
 const MAX_COLUMNS = 32
 const MAX_WORKS = 10_000
 const MAX_WORKFLOWS = 10_000
+const MAX_TEMPLATES = 2_000
 const MAX_PROJECTS = 1_000
 const MAX_ID_LENGTH = 128
 const MAX_PROJECT_LENGTH = 128
@@ -366,6 +368,208 @@ function normalizeWorkflows(input, fallbackTimestamp) {
   return workflows
 }
 
+function normalizeTemplateWorkContent(
+  input,
+  projects,
+  columnIds,
+  {
+    knownIds = new Set(['template-work']),
+    workflowIds = new Set([ROOT_WORKFLOW_ID]),
+    workId = 'template-work',
+    includeRelations = false,
+  } = {},
+) {
+  const source = requireObject(input, 'Work template content must be an object.')
+  const fields = normalizeEditableFields(
+    {
+      ...source,
+      upstreamWaterLevels: source.upstreamWaterLevels ?? {},
+      workflowId: source.workflowId ?? ROOT_WORKFLOW_ID,
+    },
+    projects,
+    { knownIds, workflowIds, workId },
+  )
+  const columnId = requireString(
+    source.columnId,
+    'Work template columnId',
+    MAX_ID_LENGTH,
+  )
+  if (!columnIds.has(columnId)) {
+    throw new TypeError(`Work template references an unknown column: ${columnId}`)
+  }
+  if (includeRelations) return { ...fields, columnId }
+  const { upstreamWaterLevels: _upstreamWaterLevels, workflowId: _workflowId, ...contentFields } = fields
+  return { ...contentFields, columnId }
+}
+
+function normalizeWorkflowTemplateContent(input, projects, columnIds) {
+  const content = requireObject(
+    input,
+    'Workflow template content must be an object.',
+  )
+  const rootWorkflowId = requireString(
+    content.rootWorkflowId,
+    'Workflow template rootWorkflowId',
+    MAX_ID_LENGTH,
+  )
+  if (!Array.isArray(content.workflows) || content.workflows.length === 0) {
+    throw new TypeError('Workflow template content must define a root Workflow.')
+  }
+  if (content.workflows.length > MAX_WORKFLOWS) {
+    throw new TypeError(
+      `Workflow template must not exceed ${MAX_WORKFLOWS} Workflows.`,
+    )
+  }
+  if (!Array.isArray(content.works)) {
+    throw new TypeError('Workflow template content Works must be an array.')
+  }
+  if (content.works.length > MAX_WORKS) {
+    throw new TypeError(`Workflow template must not exceed ${MAX_WORKS} Works.`)
+  }
+
+  const workflowIds = new Set()
+  const workflows = content.workflows.map((value, index) => {
+    const item = requireObject(
+      value,
+      `Workflow template Workflow ${index} must be an object.`,
+    )
+    const id = requireString(
+      item.id,
+      `Workflow template Workflow ${index} id`,
+      MAX_ID_LENGTH,
+    )
+    if (workflowIds.has(id)) {
+      throw new TypeError(`Duplicate Workflow template Workflow id: ${id}`)
+    }
+    workflowIds.add(id)
+    return {
+      id,
+      title: requireString(
+        item.title,
+        `Workflow template Workflow ${index} title`,
+        MAX_TITLE_LENGTH,
+      ),
+      parentWorkflowId:
+        item.parentWorkflowId === null
+          ? null
+          : requireString(
+              item.parentWorkflowId,
+              `Workflow template Workflow ${index} parentWorkflowId`,
+              MAX_ID_LENGTH,
+            ),
+    }
+  })
+  const root = workflows.find((item) => item.id === rootWorkflowId)
+  if (!root || root.parentWorkflowId !== null) {
+    throw new TypeError(
+      'Workflow template rootWorkflowId must identify the only parentless Workflow.',
+    )
+  }
+  if (workflows.some((item) => item.id !== rootWorkflowId && item.parentWorkflowId === null)) {
+    throw new TypeError('Workflow template must define exactly one root Workflow.')
+  }
+  for (const item of workflows) {
+    if (item.id === rootWorkflowId) continue
+    if (!workflowIds.has(item.parentWorkflowId)) {
+      throw new TypeError(
+        `Workflow template Workflow ${item.id} references an unknown parent Workflow: ${item.parentWorkflowId}`,
+      )
+    }
+    const visited = new Set([item.id])
+    let current = item
+    while (current.id !== rootWorkflowId) {
+      if (visited.has(current.parentWorkflowId)) {
+        throw new TypeError(
+          `Workflow template Workflow ${item.id} creates a parent cycle.`,
+        )
+      }
+      visited.add(current.parentWorkflowId)
+      current = workflows.find(
+        (candidate) => candidate.id === current.parentWorkflowId,
+      )
+    }
+  }
+
+  const workIds = new Set()
+  const indexedWorks = content.works.map((value, index) => {
+    const work = requireObject(
+      value,
+      `Workflow template Work ${index} must be an object.`,
+    )
+    const id = requireString(
+      work.id,
+      `Workflow template Work ${index} id`,
+      MAX_ID_LENGTH,
+    )
+    if (workIds.has(id)) {
+      throw new TypeError(`Duplicate Workflow template Work id: ${id}`)
+    }
+    workIds.add(id)
+    return { work, id }
+  })
+  const works = indexedWorks.map(({ work, id }) => ({
+    id,
+    ...normalizeTemplateWorkContent(work, projects, columnIds, {
+      knownIds: workIds,
+      workflowIds,
+      workId: id,
+      includeRelations: true,
+    }),
+  }))
+  return {
+    rootWorkflowId,
+    mapRootToTarget: content.mapRootToTarget === true,
+    workflows,
+    works,
+  }
+}
+
+function normalizeTemplates(input, projects, columns) {
+  const source = input === undefined ? [] : input
+  if (!Array.isArray(source)) {
+    throw new TypeError('The board templates must be an array.')
+  }
+  if (source.length > MAX_TEMPLATES) {
+    throw new TypeError(`The board must not exceed ${MAX_TEMPLATES} templates.`)
+  }
+  const columnIds = new Set(columns.map((column) => column.id))
+  const ids = new Set()
+  return source.map((value, index) => {
+    const template = requireObject(value, `Template ${index} must be an object.`)
+    const id = requireString(template.id, `Template ${index} id`, MAX_ID_LENGTH)
+    if (ids.has(id)) throw new TypeError(`Duplicate template id: ${id}`)
+    ids.add(id)
+    if (!TEMPLATE_KINDS.includes(template.kind)) {
+      throw new TypeError(`Template ${id} kind must be work or workflow.`)
+    }
+    const createdAt = normalizeTimestamp(template.createdAt)
+    return {
+      id,
+      kind: template.kind,
+      name: requireString(
+        template.name,
+        `Template ${id} name`,
+        MAX_TITLE_LENGTH,
+      ),
+      excludedExternalDependencies:
+        Number.isSafeInteger(template.excludedExternalDependencies) &&
+        template.excludedExternalDependencies >= 0
+          ? template.excludedExternalDependencies
+          : 0,
+      content:
+        template.kind === 'work'
+          ? normalizeTemplateWorkContent(template.content, projects, columnIds)
+          : normalizeWorkflowTemplateContent(
+              template.content,
+              projects,
+              columnIds,
+            ),
+      createdAt,
+      updatedAt: normalizeTimestamp(template.updatedAt, createdAt),
+    }
+  })
+}
+
 function sameStringMap(left, right) {
   const leftEntries = Object.entries(left)
   const rightEntries = Object.entries(right)
@@ -389,6 +593,7 @@ export function createDefaultBoard({
     projects: [],
     columns: columns.map((column, order) => cloneColumn(column, order)),
     workflows: [rootWorkflow(createdAt)],
+    templates: [],
     works: [
       {
         id: workId,
@@ -496,13 +701,307 @@ export function normalizeBoard(input, { workflow } = {}) {
     }
   })
 
+  const sortedColumns = columns.sort((left, right) => left.order - right.order)
+  const templates = normalizeTemplates(board.templates, projects, sortedColumns)
   return {
     version: 1,
     projects,
-    columns: columns.sort((left, right) => left.order - right.order),
+    columns: sortedColumns,
     workflows,
+    templates,
     works,
   }
+}
+
+export function workTemplateContentFromWork(workInput) {
+  const work = requireObject(workInput, 'The source Work must be an object.')
+  return {
+    type: work.type,
+    project: work.project,
+    key: work.key,
+    title: work.title,
+    description: work.description,
+    assignee: work.assignee,
+    waterLevel: work.waterLevel,
+    columnId: work.columnId,
+  }
+}
+
+export function workflowTemplateContentFromWorkflow(boardInput, workflowIdInput, { workflow } = {}) {
+  const board = normalizeBoard(boardInput, { workflow })
+  const workflowId = requireString(
+    workflowIdInput,
+    'Source Workflow id',
+    MAX_ID_LENGTH,
+  )
+  if (!board.workflows.some((item) => item.id === workflowId)) {
+    throw new TypeError(`Unknown Workflow: ${workflowId}`)
+  }
+  const includedWorkflowIds = new Set([workflowId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const item of board.workflows) {
+      if (
+        item.parentWorkflowId &&
+        includedWorkflowIds.has(item.parentWorkflowId) &&
+        !includedWorkflowIds.has(item.id)
+      ) {
+        includedWorkflowIds.add(item.id)
+        changed = true
+      }
+    }
+  }
+  const includedWorks = board.works.filter((work) =>
+    includedWorkflowIds.has(work.workflowId),
+  )
+  const includedWorkIds = new Set(includedWorks.map((work) => work.id))
+  let excludedExternalDependencies = 0
+  const works = includedWorks.map((work) => {
+    const upstreamWaterLevels = Object.fromEntries(
+      Object.entries(work.upstreamWaterLevels).filter(([upstreamId]) => {
+        if (includedWorkIds.has(upstreamId)) return true
+        excludedExternalDependencies += 1
+        return false
+      }),
+    )
+    return {
+      id: work.id,
+      ...workTemplateContentFromWork(work),
+      workflowId: work.workflowId,
+      upstreamWaterLevels,
+    }
+  })
+  return {
+    content: {
+      rootWorkflowId: workflowId,
+      mapRootToTarget: workflowId === ROOT_WORKFLOW_ID,
+      workflows: board.workflows
+        .filter((item) => includedWorkflowIds.has(item.id))
+        .map((item) => ({
+          id: item.id,
+          title: item.title,
+          parentWorkflowId:
+            item.id === workflowId ? null : item.parentWorkflowId,
+        })),
+      works,
+    },
+    excludedExternalDependencies,
+  }
+}
+
+export function addTemplate(boardInput, input, { workflow } = {}) {
+  const board = normalizeBoard(boardInput, { workflow })
+  if (board.templates.length >= MAX_TEMPLATES) {
+    throw new TypeError(`The board must not exceed ${MAX_TEMPLATES} templates.`)
+  }
+  const id = requireString(input?.id, 'Template id', MAX_ID_LENGTH)
+  if (board.templates.some((template) => template.id === id)) {
+    throw new TypeError(`Duplicate template id: ${id}`)
+  }
+  const createdAt = normalizeTimestamp(input?.createdAt, new Date().toISOString())
+  return normalizeBoard(
+    {
+      ...board,
+      templates: [
+        ...board.templates,
+        {
+          id,
+          kind: input?.kind,
+          name: input?.name,
+          content: input?.content,
+          excludedExternalDependencies:
+            input?.excludedExternalDependencies ?? 0,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      ],
+    },
+    { workflow },
+  )
+}
+
+export function updateTemplate(boardInput, input, { workflow } = {}) {
+  const board = normalizeBoard(boardInput, { workflow })
+  const templateId = requireString(
+    input?.templateId,
+    'Template id',
+    MAX_ID_LENGTH,
+  )
+  const current = board.templates.find((template) => template.id === templateId)
+  if (!current) throw new TypeError(`Unknown template: ${templateId}`)
+  const candidate = {
+    ...current,
+    name: input?.name ?? current.name,
+    content: input?.content ?? current.content,
+    excludedExternalDependencies:
+      input?.excludedExternalDependencies ??
+      current.excludedExternalDependencies,
+    updatedAt: normalizeTimestamp(input?.updatedAt, new Date().toISOString()),
+  }
+  const unchanged = canonicalTemplate(current) === canonicalTemplate(candidate)
+  if (unchanged) {
+    throw new TypeError(`Template ${templateId} already has those values.`)
+  }
+  return normalizeBoard(
+    {
+      ...board,
+      templates: board.templates.map((template) =>
+        template.id === templateId ? candidate : template,
+      ),
+    },
+    { workflow },
+  )
+}
+
+function canonicalTemplate(template) {
+  return JSON.stringify({
+    name: template.name,
+    content: template.content,
+    excludedExternalDependencies: template.excludedExternalDependencies,
+  })
+}
+
+export function removeTemplate(boardInput, input, { workflow } = {}) {
+  const board = normalizeBoard(boardInput, { workflow })
+  const templateId = requireString(
+    input?.templateId,
+    'Template id',
+    MAX_ID_LENGTH,
+  )
+  if (!board.templates.some((template) => template.id === templateId)) {
+    throw new TypeError(`Unknown template: ${templateId}`)
+  }
+  board.templates = board.templates.filter(
+    (template) => template.id !== templateId,
+  )
+  return board
+}
+
+export function instantiateTemplate(
+  boardInput,
+  input,
+  { workflow, idFactory, now = new Date().toISOString() } = {},
+) {
+  const board = normalizeBoard(boardInput, { workflow })
+  const templateId = requireString(
+    input?.templateId,
+    'Template id',
+    MAX_ID_LENGTH,
+  )
+  const targetWorkflowId = requireString(
+    input?.targetWorkflowId,
+    'Target Workflow id',
+    MAX_ID_LENGTH,
+  )
+  if (!board.workflows.some((item) => item.id === targetWorkflowId)) {
+    throw new TypeError(`Unknown target Workflow: ${targetWorkflowId}`)
+  }
+  const template = board.templates.find((item) => item.id === templateId)
+  if (!template) throw new TypeError(`Unknown template: ${templateId}`)
+  if (typeof idFactory !== 'function') {
+    throw new TypeError('Template instantiation requires an idFactory.')
+  }
+  const timestamp = normalizeTimestamp(now, new Date().toISOString())
+  const allocate = (label, existingIds) => {
+    const id = requireString(idFactory(), label, MAX_ID_LENGTH)
+    if (existingIds.has(id)) throw new TypeError(`${label} already exists: ${id}`)
+    existingIds.add(id)
+    return id
+  }
+  const workflowIds = new Set(board.workflows.map((item) => item.id))
+  const workIds = new Set(board.works.map((item) => item.id))
+
+  if (template.kind === 'work') {
+    if (board.works.length >= MAX_WORKS) {
+      throw new TypeError(`The board must not exceed ${MAX_WORKS} Works.`)
+    }
+    const id = allocate('Instantiated Work id', workIds)
+    return normalizeBoard(
+      {
+        ...board,
+        works: [
+          ...board.works,
+          {
+            id,
+            ...template.content,
+            workflowId: targetWorkflowId,
+            upstreamWaterLevels: {},
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        ],
+      },
+      { workflow },
+    )
+  }
+
+  const mapsRootToTarget = template.content.mapRootToTarget === true
+  const createdWorkflowCount =
+    template.content.workflows.length - (mapsRootToTarget ? 1 : 0)
+  if (board.workflows.length + createdWorkflowCount > MAX_WORKFLOWS) {
+    throw new TypeError(`The board must not exceed ${MAX_WORKFLOWS} Workflows.`)
+  }
+  if (board.works.length + template.content.works.length > MAX_WORKS) {
+    throw new TypeError(`The board must not exceed ${MAX_WORKS} Works.`)
+  }
+  const workflowIdMap = new Map()
+  for (const item of template.content.workflows) {
+    workflowIdMap.set(
+      item.id,
+      mapsRootToTarget && item.id === template.content.rootWorkflowId
+        ? targetWorkflowId
+        : allocate('Instantiated Workflow id', workflowIds),
+    )
+  }
+  const workIdMap = new Map(
+    template.content.works.map((item) => [
+      item.id,
+      allocate('Instantiated Work id', workIds),
+    ]),
+  )
+  const createdWorkflows = template.content.workflows
+    .filter(
+      (item) =>
+        !mapsRootToTarget || item.id !== template.content.rootWorkflowId,
+    )
+    .map((item) => ({
+      id: workflowIdMap.get(item.id),
+      title: item.title,
+      parentWorkflowId:
+        item.id === template.content.rootWorkflowId
+          ? targetWorkflowId
+          : workflowIdMap.get(item.parentWorkflowId),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }))
+  const createdWorks = template.content.works.map((work) => ({
+    id: workIdMap.get(work.id),
+    type: work.type,
+    project: work.project,
+    key: work.key,
+    title: work.title,
+    description: work.description,
+    assignee: work.assignee,
+    waterLevel: work.waterLevel,
+    upstreamWaterLevels: Object.fromEntries(
+      Object.entries(work.upstreamWaterLevels).map(
+        ([upstreamId, waterLevel]) => [workIdMap.get(upstreamId), waterLevel],
+      ),
+    ),
+    workflowId: workflowIdMap.get(work.workflowId),
+    columnId: work.columnId,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }))
+  return normalizeBoard(
+    {
+      ...board,
+      workflows: [...board.workflows, ...createdWorkflows],
+      works: [...board.works, ...createdWorks],
+    },
+    { workflow },
+  )
 }
 
 export function addWork(boardInput, input, { workflow } = {}) {
@@ -676,6 +1175,15 @@ export function removeProject(boardInput, input, { workflow } = {}) {
   }
   if (board.works.some((work) => work.project === project)) {
     throw new TypeError(`Project ${project} is still used by one or more Works.`)
+  }
+  if (
+    board.templates.some((template) =>
+      template.kind === 'work'
+        ? template.content.project === project
+        : template.content.works.some((work) => work.project === project),
+    )
+  ) {
+    throw new TypeError(`Project ${project} is still used by one or more templates.`)
   }
   board.projects = board.projects.filter((candidate) => candidate !== project)
   return board

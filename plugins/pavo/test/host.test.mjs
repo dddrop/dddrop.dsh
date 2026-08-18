@@ -243,7 +243,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.version, 5)
+    assert.equal(board.version, 6)
     assert.deepEqual(board.projects, ['Harness'])
     assert.equal(board.cards, undefined)
     assert.equal(board.tickets, undefined)
@@ -362,6 +362,60 @@ test('serves nested Workflow mutations with optimistic revisions', async () => {
   }
 })
 
+test('serves shared template CRUD and passive instantiation', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-template-api-'))
+  const routes = []
+  try {
+    await apply(createContext((registered) => routes.push(registered)), {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+      settingsPath: path.join(root, '.pavo-settings.json'),
+    })
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const overview = await call(route, 'overview')
+    const sourceWorkId = overview.payload.value.board.works[0].id
+    const created = await call(route, 'addTemplate', {
+      kind: 'work',
+      name: 'Welcome template',
+      sourceWorkId,
+      expectedRevision: overview.payload.value.revision,
+    })
+    assert.equal(created.response.status, 200, created.response.body)
+    const template = created.payload.value.board.templates[0]
+    assert.equal(template.kind, 'work')
+    assert.equal(template.content.title, overview.payload.value.board.works[0].title)
+
+    const renamed = await call(route, 'updateTemplate', {
+      templateId: template.id,
+      name: 'Reusable welcome',
+      expectedRevision: created.payload.value.revision,
+    })
+    assert.equal(renamed.response.status, 200, renamed.response.body)
+    assert.equal(renamed.payload.value.board.templates[0].name, 'Reusable welcome')
+
+    const applied = await call(route, 'instantiateTemplate', {
+      templateId: template.id,
+      targetWorkflowId: 'root',
+      expectedRevision: renamed.payload.value.revision,
+    })
+    assert.equal(applied.response.status, 200, applied.response.body)
+    assert.equal(applied.payload.value.board.works.length, 2)
+    assert.notEqual(applied.payload.value.board.works[1].id, sourceWorkId)
+    assert.deepEqual(applied.payload.value.board.works[1].upstreamWaterLevels, {})
+
+    const removed = await call(route, 'removeTemplate', {
+      templateId: template.id,
+      expectedRevision: applied.payload.value.revision,
+    })
+    assert.equal(removed.response.status, 200, removed.response.body)
+    assert.deepEqual(removed.payload.value.board.templates, [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('registers passive Agent tools for reading and updating Works', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-tools-'))
   const routes = []
@@ -387,6 +441,9 @@ test('registers passive Agent tools for reading and updating Works', async () =>
         'pavo_read_work',
         'pavo_update_work',
         'pavo_update_workflow',
+        'pavo_list_templates',
+        'pavo_update_template',
+        'pavo_apply_template',
       ],
     )
     const listTool = tools.find((tool) => tool.name === 'pavo_list_works')
@@ -394,6 +451,15 @@ test('registers passive Agent tools for reading and updating Works', async () =>
     const updateTool = tools.find((tool) => tool.name === 'pavo_update_work')
     const updateWorkflowTool = tools.find(
       (tool) => tool.name === 'pavo_update_workflow',
+    )
+    const listTemplatesTool = tools.find(
+      (tool) => tool.name === 'pavo_list_templates',
+    )
+    const updateTemplateTool = tools.find(
+      (tool) => tool.name === 'pavo_update_template',
+    )
+    const applyTemplateTool = tools.find(
+      (tool) => tool.name === 'pavo_apply_template',
     )
     const listed = await listTool.execute({})
     assert.equal(listed.total, 1)
@@ -464,10 +530,35 @@ test('registers passive Agent tools for reading and updating Works', async () =>
     })
     assert.equal(emptyFieldsCreated.work.project, '')
     assert.equal(emptyFieldsCreated.work.key, '')
+
+    const templateCreated = await updateTemplateTool.execute({
+      action: 'create',
+      expectedRevision: emptyFieldsCreated.revision,
+      kind: 'work',
+      name: 'Ongoing Work template',
+      sourceWorkId: read.work.id,
+    })
+    assert.equal(templateCreated.template.kind, 'work')
+    assert.equal(templateCreated.template.content.type, 'ongoing')
+    assert.equal(templateCreated.template.excludedExternalDependencies, 0)
+    const templateList = await listTemplatesTool.execute({ kind: 'work' })
+    assert.equal(templateList.total, 1)
+    assert.equal(templateList.templates[0].id, templateCreated.template.id)
+    assert.match(
+      listTemplatesTool.output.render({}, templateList)[0].text,
+      new RegExp(templateCreated.template.id),
+    )
+    const applied = await applyTemplateTool.execute({
+      expectedRevision: templateCreated.revision,
+      templateId: templateCreated.template.id,
+      targetWorkflowId: 'root',
+    })
+    assert.equal(applied.createdWorkflowIds.length, 0)
+    assert.equal(applied.createdWorkIds.length, 1)
     await assert.rejects(
       updateWorkflowTool.execute({
         action: 'delete',
-        expectedRevision: emptyFieldsCreated.revision,
+        expectedRevision: applied.revision,
         workflowId: workflowCreated.workflow.id,
       }),
       /still contains Works/,

@@ -302,8 +302,8 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 5
-const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4])
+const BOARD_FORMAT_VERSION = 6
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5])
 const TICKET_FORMAT_VERSION = 4
 const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3])
 const MAX_TICKET_ID_LENGTH = 128
@@ -342,6 +342,7 @@ function splitBoardDocuments(boardInput, workflow) {
       projects: board.projects,
       columns: board.columns,
       workflows: board.workflows,
+      templates: board.templates,
       works: board.works.map((work, order) => ({
         id: work.id,
         columnId: work.columnId,
@@ -763,7 +764,7 @@ export class GitBoardRepository {
         ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
           document.version,
         ) ||
-        ([4, BOARD_FORMAT_VERSION].includes(document.version)
+        ([4, 5, BOARD_FORMAT_VERSION].includes(document.version)
           ? !Array.isArray(document.works)
           : !Array.isArray(document.tickets))
       ) {
@@ -773,7 +774,7 @@ export class GitBoardRepository {
       }
 
       const projects = document.projects ?? []
-      const placements = ([4, BOARD_FORMAT_VERSION].includes(document.version)
+      const placements = ([4, 5, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
         .map((value, index) => {
@@ -913,6 +914,7 @@ export class GitBoardRepository {
           projects,
           columns: document.columns,
           workflows: document.workflows,
+          templates: document.templates,
           works,
         },
         { workflow: this.config.columns },
@@ -1184,7 +1186,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'refactor(pavo): add root workflow containers',
+      'refactor(pavo): add template library',
       snapshot.board,
     )
     this.cachedSnapshot = migrated
