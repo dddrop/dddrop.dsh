@@ -64,6 +64,11 @@ export function createClientPlugin() {
       letter-spacing: 0.005em;
     }
 
+    body [data-input-scroll] textarea {
+      font-feature-settings: inherit;
+      letter-spacing: inherit;
+    }
+
     body :where(button, input, textarea, select, [role='button'], [role='textbox'], [role='combobox']) {
       border-radius: 6px !important;
       transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease, transform 120ms ease;
