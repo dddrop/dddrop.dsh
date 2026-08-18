@@ -13,10 +13,10 @@ index f57caea9e5..a76c04c8a3 100644
      inject: (sessionId: SessionId, actions: BoundActions<typeof chatStore>): ChatViewInjected => {
 diff --git a/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css b/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css
 new file mode 100644
-index 0000000000..e5a27982ff
+index 0000000000..baa82ed605
 --- /dev/null
 +++ b/packages/client/ui-conversation/src/client/chat/ActivityCluster.module.css
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,159 @@
 +.root {
 +  min-width: 0;
 +  display: flex;
@@ -95,6 +95,10 @@ index 0000000000..e5a27982ff
 +  border-radius: 8px;
 +  padding: 10px 12px;
 +  background: var(--dsw-alias-bg-layer-1);
++  box-shadow: none;
++}
++
++:global(body[data-ds-dark-theme]) .detail {
 +  box-shadow: var(--dsw-shadow-lv1-blur);
 +}
 +
@@ -818,6 +822,19 @@ index c9b6f658ca..46740ceda7 100644
    'todo.title': 'To-dos',
    'todo.progress.done': '{done} completed',
    'todo.progress.active': '{active} in progress',
+diff --git a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+index 6a2eb5fdf4..b786ce10cf 100644
+--- a/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
++++ b/packages/client/ui-conversation/src/client/skeleton/InputBar.module.css
+@@ -69,7 +69,7 @@
+   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
+   border-radius: 22px;
+   background: var(--dsw-specific-input-major);
+-  box-shadow: var(--dsw-shadow-lv2);
++  box-shadow: none;
+   font-size: 16px;
+   line-height: 24px;
+   /* Elevated surface in dark, same as the menus: the draft scrollport inside
 diff --git a/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx b/packages/client/ui-conversation/tests/activity-cluster.client.spec.tsx
 new file mode 100644
 index 0000000000..335e492a9a
@@ -1111,6 +1128,19 @@ index 0000000000..2e44d88d5d
 +      .not.toBe(activityMembershipSignature(['assistant'], lookup([visible])))
 +  })
 +})
+diff --git a/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css b/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css
+index de10a3bd36..9c373b47b9 100644
+--- a/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css
++++ b/packages/client/ui-settings-plugin-inventory/src/client/PluginInventorySettingsTab.module.css
+@@ -119,7 +119,7 @@
+ 
+ .card[data-open='true'] {
+   border-color: var(--dsw-alias-border-l1);
+-  box-shadow: var(--dsw-shadow-lv1);
++  box-shadow: none;
+ }
+ 
+ .cardContent {
 diff --git a/packages/client/ui-tool/src/client/apply.ts b/packages/client/ui-tool/src/client/apply.ts
 index ec2f0b8ec1..c9ed379e68 100644
 --- a/packages/client/ui-tool/src/client/apply.ts
