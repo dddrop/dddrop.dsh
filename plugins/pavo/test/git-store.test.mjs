@@ -14,7 +14,15 @@ import path from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
 
-import { addCard, createDefaultBoard } from '../src/board.js'
+import {
+  ROOT_WORKFLOW_ID,
+  addProject,
+  addWork,
+  addWorkflow,
+  createDefaultBoard,
+  removeWork,
+  updateWork,
+} from '../src/board.js'
 import {
   GitBoardRepository,
   RepositoryError,
@@ -29,6 +37,26 @@ async function git(cwd, ...args) {
     timeout: 30_000,
   })
   return result.stdout.trim()
+}
+
+function addConfiguredWork(board, input, workflow) {
+  const configured = board.projects.includes('Harness')
+    ? board
+    : addProject(board, { project: 'Harness' }, { workflow })
+  return addWork(
+    configured,
+    {
+      project: 'Harness',
+      key: input.id.toUpperCase(),
+      type: 'goal',
+      description: '',
+      upstreamWaterLevels: {},
+      assignee: '',
+      waterLevel: '0',
+      ...input,
+    },
+    { workflow },
+  )
 }
 
 test('pulls remote changes, rejects stale revisions, and pushes mutations', async () => {
@@ -70,7 +98,7 @@ test('pulls remote changes, rejects stale revisions, and pushes mutations', asyn
       peer,
       'kanban',
       'tickets',
-      `${peerBoard.tickets[0].id}.json`,
+      `${peerBoard.works[0].id}.json`,
     )
     const peerTicket = JSON.parse(await readFile(peerTicketPath, 'utf8'))
     peerTicket.title = 'Changed in another clone'
@@ -80,7 +108,7 @@ test('pulls remote changes, rejects stale revisions, and pushes mutations', asyn
       peer,
       'add',
       '--',
-      `kanban/tickets/${peerBoard.tickets[0].id}.json`,
+      `kanban/tickets/${peerBoard.works[0].id}.json`,
     )
     await git(peer, 'commit', '-m', 'feat(kanban): update card remotely')
     await git(peer, 'push', 'origin', 'HEAD:main')
@@ -91,7 +119,7 @@ test('pulls remote changes, rejects stale revisions, and pushes mutations', asyn
         expectedRevision: initial.revision,
         commitMessage: 'feat(kanban): add card',
         mutation: (board) =>
-          addCard(
+          addConfiguredWork(
             board,
             {
               id: 'stale-card',
@@ -99,19 +127,19 @@ test('pulls remote changes, rejects stale revisions, and pushes mutations', asyn
               columnId: 'backlog',
               createdAt: '2026-02-02T00:00:00.000Z',
             },
-            { workflow: refreshedRepository.config.columns },
+            refreshedRepository.config.columns,
           ),
       }),
       StaleRevisionError,
     )
 
     const refreshed = await refreshedRepository.overview()
-    assert.equal(refreshed.board.cards[0].title, 'Changed in another clone')
+    assert.equal(refreshed.board.works[0].title, 'Changed in another clone')
     const pushed = await refreshedRepository.mutate({
       expectedRevision: refreshed.revision,
       commitMessage: 'feat(kanban): add card',
       mutation: (board) =>
-        addCard(
+        addConfiguredWork(
           board,
           {
             id: 'fresh-card',
@@ -119,12 +147,12 @@ test('pulls remote changes, rejects stale revisions, and pushes mutations', asyn
             columnId: 'backlog',
             createdAt: '2026-02-03T00:00:00.000Z',
           },
-          { workflow: refreshedRepository.config.columns },
+          refreshedRepository.config.columns,
         ),
     })
 
     assert.equal(
-      pushed.board.cards.some((card) => card.id === 'fresh-card'),
+      pushed.board.works.some((card) => card.id === 'fresh-card'),
       true,
     )
     assert.equal(await git(remote, 'rev-list', '--count', 'main'), '3')
@@ -156,7 +184,7 @@ test('serializes repository instances and rejects the stale concurrent writer', 
         expectedRevision: initial.revision,
         commitMessage: 'feat(kanban): add card',
         mutation: (board) =>
-          addCard(
+          addConfiguredWork(
             board,
             {
               id,
@@ -164,7 +192,7 @@ test('serializes repository instances and rejects the stale concurrent writer', 
               columnId: 'backlog',
               createdAt: '2026-02-04T00:00:00.000Z',
             },
-            { workflow: repository.config.columns },
+            repository.config.columns,
           ),
       })
 
@@ -180,7 +208,7 @@ test('serializes repository instances and rejects the stale concurrent writer', 
     assert.equal(rejected.reason instanceof StaleRevisionError, true)
 
     const final = await initializer.overview()
-    assert.equal(final.board.cards.length, 2)
+    assert.equal(final.board.works.length, 2)
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -227,6 +255,31 @@ test('returns the local board before background Git synchronization completes', 
   }
 })
 
+test('rejects symlinked ancestors before initializing a repository', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-root-symlink-'))
+  const outsidePath = path.join(root, 'outside')
+  const linkedPath = path.join(root, 'linked')
+
+  try {
+    await mkdir(outsidePath)
+    await symlink(outsidePath, linkedPath)
+    const repository = new GitBoardRepository({
+      repositoryPath: path.join(linkedPath, 'repository'),
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    })
+
+    await assert.rejects(repository.overview(), /symlinked ancestors/)
+    await assert.rejects(
+      readFile(path.join(outsidePath, 'repository', 'kanban', 'board.json')),
+      { code: 'ENOENT' },
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('rejects symlinked ancestors in a nested data directory', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-kanban-symlink-'))
   const repositoryPath = path.join(root, 'repository')
@@ -267,7 +320,7 @@ test('rejects invalid placement order and orphan ticket files', async () => {
     const boardPath = path.join(root, 'kanban', 'board.json')
     const boardSource = await readFile(boardPath, 'utf8')
     const boardDocument = JSON.parse(boardSource)
-    boardDocument.tickets[0].order = 2
+    boardDocument.works[0].order = 2
     await writeFile(boardPath, `${JSON.stringify(boardDocument, null, 2)}\n`)
     await assert.rejects(repository.overview(), /order must be unique and contiguous/)
 
@@ -288,6 +341,74 @@ test('rejects invalid placement order and orphan ticket files', async () => {
   }
 })
 
+test('reads legacy split storage with deterministic card defaults', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-kanban-legacy-split-'))
+
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    const writer = new GitBoardRepository(config)
+    await writer.overview()
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const boardDocument = JSON.parse(await readFile(boardPath, 'utf8'))
+    boardDocument.version = 2
+    boardDocument.tickets = boardDocument.works
+    delete boardDocument.works
+    delete boardDocument.projects
+    await writeFile(boardPath, `${JSON.stringify(boardDocument, null, 2)}\n`)
+
+    const ticketPath = path.join(
+      root,
+      'kanban',
+      'tickets',
+      `${boardDocument.tickets[0].id}.json`,
+    )
+    const ticketDocument = JSON.parse(await readFile(ticketPath, 'utf8'))
+    ticketDocument.version = 1
+    ticketDocument.body = ticketDocument.description
+    delete ticketDocument.type
+    delete ticketDocument.project
+    delete ticketDocument.key
+    delete ticketDocument.description
+    delete ticketDocument.assignee
+    delete ticketDocument.waterLevel
+    delete ticketDocument.upstreamWaterLevels
+    await writeFile(ticketPath, `${JSON.stringify(ticketDocument, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json', 'kanban/tickets')
+    await git(root, 'commit', '-m', 'test: prepare legacy split storage')
+
+    const reader = new GitBoardRepository(config)
+    const snapshot = await reader.overview()
+    assert.deepEqual(snapshot.board.projects, [])
+    assert.deepEqual(
+      {
+        type: snapshot.board.works[0].type,
+        project: snapshot.board.works[0].project,
+        key: snapshot.board.works[0].key,
+        description: snapshot.board.works[0].description,
+        upstreamWaterLevels: snapshot.board.works[0].upstreamWaterLevels,
+        assignee: snapshot.board.works[0].assignee,
+        waterLevel: snapshot.board.works[0].waterLevel,
+      },
+      {
+        type: 'goal',
+        project: '',
+        key: '',
+        description: '',
+        upstreamWaterLevels: {},
+        assignee: '',
+        waterLevel: '0',
+      },
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('migrates a legacy combined board into split ticket files once', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-kanban-migration-'))
 
@@ -302,6 +423,17 @@ test('migrates a legacy combined board into split ticket files once', async () =
       id: legacyTicketId,
       now: '2026-02-05T00:00:00.000Z',
     })
+    legacyBoard.cards = legacyBoard.works
+    delete legacyBoard.works
+    delete legacyBoard.projects
+    legacyBoard.cards[0].body = legacyBoard.cards[0].description
+    delete legacyBoard.cards[0].type
+    delete legacyBoard.cards[0].project
+    delete legacyBoard.cards[0].key
+    delete legacyBoard.cards[0].description
+    delete legacyBoard.cards[0].upstreamWaterLevels
+    delete legacyBoard.cards[0].assignee
+    delete legacyBoard.cards[0].waterLevel
     await writeFile(
       path.join(root, 'kanban', 'board.json'),
       `${JSON.stringify(legacyBoard, null, 2)}\n`,
@@ -316,8 +448,8 @@ test('migrates a legacy combined board into split ticket files once', async () =
       initializeRepository: false,
     })
     const migrated = await repository.overview()
-    assert.equal(migrated.format, 'split')
-    assert.equal(migrated.board.cards[0].id, legacyTicketId)
+    assert.equal(migrated.format, 'split-current')
+    assert.equal(migrated.board.works[0].id, legacyTicketId)
 
     const boardDocument = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
@@ -328,20 +460,199 @@ test('migrates a legacy combined board into split ticket files once', async () =
         'utf8',
       ),
     )
-    assert.equal(boardDocument.version, 2)
+    assert.equal(boardDocument.version, 5)
+    assert.deepEqual(boardDocument.projects, [])
     assert.equal(boardDocument.cards, undefined)
-    assert.deepEqual(boardDocument.tickets, [
+    assert.equal(boardDocument.tickets, undefined)
+    assert.deepEqual(boardDocument.works, [
       { id: legacyTicketId, columnId: 'backlog', order: 0 },
     ])
+    assert.equal(ticketDocument.version, 4)
     assert.equal(ticketDocument.title, legacyBoard.cards[0].title)
+    assert.equal(ticketDocument.key, '')
+    assert.equal(ticketDocument.waterLevel, '0')
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'refactor(kanban): split ticket storage',
+      'refactor(pavo): add root workflow containers',
     )
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
 
     await repository.overview()
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('migrates an empty version 4 board without a tracked tickets path', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-empty-migration-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    const writer = new GitBoardRepository(config)
+    const initial = await writer.overview()
+    const emptied = await writer.mutate({
+      expectedRevision: initial.revision,
+      commitMessage: 'test: empty board',
+      mutation: (board) => removeWork(board, { workId: board.works[0].id }),
+    })
+    assert.equal(emptied.board.works.length, 0)
+
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const legacy = JSON.parse(await readFile(boardPath, 'utf8'))
+    legacy.version = 4
+    delete legacy.workflows
+    await writeFile(boardPath, `${JSON.stringify(legacy, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json')
+    await git(root, 'commit', '-m', 'test: prepare empty version 4 board')
+
+    const migrated = await new GitBoardRepository(config).overview()
+    assert.equal(migrated.format, 'split-current')
+    assert.equal(migrated.board.works.length, 0)
+    assert.equal(migrated.board.workflows[0].id, ROOT_WORKFLOW_ID)
+    const currentDocument = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(currentDocument.version, 5)
+    assert.equal(
+      await git(root, 'log', '-1', '--format=%s'),
+      'refactor(pavo): add root workflow containers',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('persists nested Workflows and Work membership in current storage', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-workflows-'))
+  try {
+    const repository = new GitBoardRepository({
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    })
+    const initial = await repository.overview()
+    const nested = await repository.mutate({
+      expectedRevision: initial.revision,
+      commitMessage: 'feat(pavo): add nested workflow',
+      mutation: (board) => {
+        const withWorkflow = addWorkflow(board, {
+          id: 'release',
+          title: 'Release',
+          parentWorkflowId: ROOT_WORKFLOW_ID,
+        })
+        return addConfiguredWork(
+          withWorkflow,
+          {
+            id: 'release-work',
+            title: 'Release Work',
+            workflowId: 'release',
+            columnId: 'backlog',
+          },
+          repository.config.columns,
+        )
+      },
+    })
+    const reloaded = await new GitBoardRepository(repository.config).overview()
+    assert.equal(reloaded.revision, nested.revision)
+    assert.equal(reloaded.board.workflows[1].parentWorkflowId, ROOT_WORKFLOW_ID)
+    assert.equal(
+      reloaded.board.works.find((work) => work.id === 'release-work').workflowId,
+      'release',
+    )
+    const boardDocument = JSON.parse(
+      await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
+    )
+    const ticketDocument = JSON.parse(
+      await readFile(path.join(root, 'kanban', 'tickets', 'release-work.json'), 'utf8'),
+    )
+    assert.equal(boardDocument.version, 5)
+    assert.equal(boardDocument.workflows[0].id, ROOT_WORKFLOW_ID)
+    assert.equal(ticketDocument.version, 4)
+    assert.equal(ticketDocument.workflowId, 'release')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('persists cyclic Work dependencies and acknowledged WaterLevels', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-cycle-'))
+  try {
+    const repository = new GitBoardRepository({
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    })
+    const initial = await repository.overview()
+    const created = await repository.mutate({
+      expectedRevision: initial.revision,
+      commitMessage: 'feat(pavo): add cyclic works',
+      mutation: (board) => {
+        let next = addConfiguredWork(
+          board,
+          {
+            id: 'code',
+            type: 'goal',
+            title: 'Implement code',
+            waterLevel: '12',
+            columnId: 'in-progress',
+          },
+          repository.config.columns,
+        )
+        next = addConfiguredWork(
+          next,
+          {
+            id: 'review',
+            type: 'ongoing',
+            title: 'Review code',
+            waterLevel: '6',
+            columnId: 'review',
+          },
+          repository.config.columns,
+        )
+        return next
+      },
+    })
+    const cycled = await repository.mutate({
+      expectedRevision: created.revision,
+      commitMessage: 'feat(pavo): connect cyclic works',
+      mutation: (board) => {
+        const code = board.works.find((work) => work.id === 'code')
+        const review = board.works.find((work) => work.id === 'review')
+        let next = updateWork(board, {
+          workId: code.id,
+          ...code,
+          upstreamWaterLevels: { review: '5' },
+        })
+        const currentReview = next.works.find((work) => work.id === review.id)
+        next = updateWork(next, {
+          workId: currentReview.id,
+          ...currentReview,
+          upstreamWaterLevels: { code: '12' },
+        })
+        return next
+      },
+    })
+    const reloaded = await new GitBoardRepository(repository.config).overview()
+    assert.equal(reloaded.revision, cycled.revision)
+    assert.deepEqual(
+      reloaded.board.works.find((work) => work.id === 'code').upstreamWaterLevels,
+      { review: '5' },
+    )
+    assert.deepEqual(
+      reloaded.board.works.find((work) => work.id === 'review').upstreamWaterLevels,
+      { code: '12' },
+    )
+    const codeDocument = JSON.parse(
+      await readFile(path.join(root, 'kanban', 'tickets', 'code.json'), 'utf8'),
+    )
+    assert.equal(codeDocument.version, 4)
+    assert.equal(codeDocument.description, '')
+    assert.deepEqual(codeDocument.upstreamWaterLevels, { review: '5' })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -391,7 +702,7 @@ test('leaves the local branch unchanged when a detached push fails', async () =>
         expectedRevision: initial.revision,
         commitMessage: 'feat(kanban): add card',
         mutation: (board) =>
-          addCard(
+          addConfiguredWork(
             board,
             {
               id: 'retryable-card',
@@ -399,13 +710,13 @@ test('leaves the local branch unchanged when a detached push fails', async () =>
               columnId: 'backlog',
               createdAt: '2026-02-05T00:00:00.000Z',
             },
-            { workflow: repository.config.columns },
+            repository.config.columns,
           ),
       }),
       (error) =>
         error instanceof RepositoryError &&
         error.status === 503 &&
-        /before the local Kanban branch was changed/.test(error.message),
+        /before the local Pavo branch was changed/.test(error.message),
     )
 
     assert.equal(await git(local, 'rev-parse', 'HEAD'), initialHead)
@@ -427,7 +738,7 @@ test('leaves the local branch unchanged when a detached push fails', async () =>
       expectedRevision: initial.revision,
       commitMessage: 'feat(kanban): add card',
       mutation: (board) =>
-        addCard(
+        addConfiguredWork(
           board,
           {
             id: 'retryable-card',
@@ -435,12 +746,12 @@ test('leaves the local branch unchanged when a detached push fails', async () =>
             columnId: 'backlog',
             createdAt: '2026-02-05T00:00:00.000Z',
           },
-          { workflow: repository.config.columns },
+          repository.config.columns,
         ),
     })
 
     assert.equal(
-      retried.board.cards.some((card) => card.id === 'retryable-card'),
+      retried.board.works.some((card) => card.id === 'retryable-card'),
       true,
     )
     assert.equal(await git(remote, 'rev-list', '--count', 'main'), '2')

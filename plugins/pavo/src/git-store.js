@@ -20,10 +20,12 @@ import { promisify } from 'node:util'
 
 import {
   DEFAULT_WORKFLOW,
+  ROOT_WORKFLOW_ID,
   createDefaultBoard,
   normalizeBoard,
   normalizeWorkflow,
 } from './board.js'
+import { uuidv7 } from './uuid-v7.js'
 
 const execFileAsync = promisify(execFile)
 const GIT_TIMEOUT_MS = 30_000
@@ -83,6 +85,22 @@ function expandHome(value) {
   return value
 }
 
+function resolveDshHome() {
+  const configured = process.env.DSH_HOME?.trim()
+  return configured
+    ? path.resolve(expandHome(configured))
+    : path.join(os.homedir(), '.dsh')
+}
+
+function normalizeSettingsPath(value) {
+  const configured = requireString(
+    value,
+    'settingsPath',
+    path.join(resolveDshHome(), 'pavo', 'repository.json'),
+  )
+  return path.resolve(expandHome(configured))
+}
+
 function validateGitToken(value, field) {
   if (value.startsWith('-') || /[\0\r\n]/u.test(value)) {
     throw new TypeError(`${field} contains unsupported characters.`)
@@ -106,7 +124,7 @@ function normalizeDataDirectory(value) {
 }
 
 export function normalizeConfig(input) {
-  const config = requireObject(input, 'The Kanban configuration must be an object.')
+  const config = requireObject(input, 'The Pavo configuration must be an object.')
   const repositoryPath = requireString(
     config.repositoryPath,
     'repositoryPath',
@@ -115,6 +133,7 @@ export function normalizeConfig(input) {
 
   return {
     repositoryPath: path.resolve(expandHome(repositoryPath)),
+    settingsPath: normalizeSettingsPath(config.settingsPath),
     dataDirectory: normalizeDataDirectory(config.dataDirectory),
     branch: validateGitToken(
       requireString(config.branch, 'branch', 'main'),
@@ -146,12 +165,12 @@ export function normalizeConfig(input) {
     gitAuthorName: requireString(
       config.gitAuthorName,
       'gitAuthorName',
-      'DSH Kanban',
+      'DSH Pavo',
     ),
     gitAuthorEmail: requireString(
       config.gitAuthorEmail,
       'gitAuthorEmail',
-      'kanban@localhost',
+      'pavo@localhost',
     ),
     columns: workflow,
   }
@@ -160,7 +179,7 @@ export function normalizeConfig(input) {
 export const Config = {
   '~standard': {
     version: 1,
-    vendor: '@dddrop/dsh-plugin-kanban',
+    vendor: '@dddrop/dsh-plugin-pavo',
     validate(value) {
       try {
         return { value: normalizeConfig(value) }
@@ -186,6 +205,33 @@ async function pathStatus(filePath) {
   }
 }
 
+async function assertNoSymlinkAncestors(targetPath, label) {
+  const root = path.parse(targetPath).root
+  let currentPath = root
+  const segments = path.relative(root, targetPath).split(path.sep).filter(Boolean)
+  for (let index = 0; index < segments.length; index += 1) {
+    currentPath = path.join(currentPath, segments[index])
+    const status = await pathStatus(currentPath)
+    if (!status) return
+    if (status.isSymbolicLink()) {
+      // Permit root-owned system aliases such as macOS /var, but never a
+      // configurable leaf or a link controlled through a writable parent.
+      const parentStatus = await lstat(path.dirname(currentPath))
+      const ownedByProcess =
+        typeof process.getuid === 'function' &&
+        parentStatus.uid === process.getuid()
+      const writableByOthers = (parentStatus.mode & 0o022) !== 0
+      if (index === segments.length - 1 || ownedByProcess || writableByOthers) {
+        throw new RepositoryError(`${label} must not contain symlinked ancestors.`)
+      }
+      continue
+    }
+    if (index < segments.length - 1 && !status.isDirectory()) {
+      throw new RepositoryError(`${label} has a non-directory ancestor.`)
+    }
+  }
+}
+
 function isInsidePath(rootPath, candidatePath) {
   return (
     candidatePath === rootPath ||
@@ -205,13 +251,13 @@ async function ensureSafeDirectory(rootPath, relativePath = '') {
     const currentStatus = await lstat(currentPath)
     if (currentStatus.isSymbolicLink() || !currentStatus.isDirectory()) {
       throw new RepositoryError(
-        'Kanban data directories must be regular directories, not symlinks.',
+        'Pavo data directories must be regular directories, not symlinks.',
       )
     }
     const currentRealPath = await realpath(currentPath)
     if (!isInsidePath(rootRealPath, currentRealPath)) {
       throw new RepositoryError(
-        'The Kanban data directory resolves outside the Git repository.',
+        'The Pavo data directory resolves outside the Git repository.',
       )
     }
   }
@@ -256,8 +302,10 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 2
-const TICKET_FORMAT_VERSION = 1
+const BOARD_FORMAT_VERSION = 5
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4])
+const TICKET_FORMAT_VERSION = 4
+const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3])
 const MAX_TICKET_ID_LENGTH = 128
 const SAFE_TICKET_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
 
@@ -291,19 +339,29 @@ function splitBoardDocuments(boardInput, workflow) {
     board,
     boardDocument: {
       version: BOARD_FORMAT_VERSION,
+      projects: board.projects,
       columns: board.columns,
-      tickets: board.cards.map((card, order) => ({
-        id: card.id,
-        columnId: card.columnId,
+      workflows: board.workflows,
+      works: board.works.map((work, order) => ({
+        id: work.id,
+        columnId: work.columnId,
         order,
       })),
     },
-    ticketDocuments: board.cards.map((card) => ({
+    ticketDocuments: board.works.map((work) => ({
       version: TICKET_FORMAT_VERSION,
-      id: card.id,
-      title: card.title,
-      createdAt: card.createdAt,
-      updatedAt: card.updatedAt,
+      id: work.id,
+      type: work.type,
+      project: work.project,
+      key: work.key,
+      title: work.title,
+      description: work.description,
+      assignee: work.assignee,
+      waterLevel: work.waterLevel,
+      upstreamWaterLevels: work.upstreamWaterLevels,
+      workflowId: work.workflowId,
+      createdAt: work.createdAt,
+      updatedAt: work.updatedAt,
     })),
   }
 }
@@ -313,7 +371,7 @@ function revisionOf(source) {
 }
 
 function sanitizeGitFailure(operation) {
-  return new RepositoryError(`Git ${operation} failed for the Kanban data repository.`)
+  return new RepositoryError(`Git ${operation} failed for the Pavo data repository.`)
 }
 
 export class GitBoardRepository {
@@ -379,7 +437,7 @@ export class GitBoardRepository {
     }
 
     throw new RepositoryError(
-      'The Kanban data repository is busy. Try again shortly.',
+      'The Pavo data repository is busy. Try again shortly.',
       503,
     )
   }
@@ -426,11 +484,82 @@ export class GitBoardRepository {
     return this.runGitAt(this.root, argumentsList, options)
   }
 
+  async validate() {
+    await assertNoSymlinkAncestors(this.root, 'The Pavo repository path')
+    const rootStatus = await pathStatus(this.root)
+    if (!rootStatus) {
+      if (this.config.initializeRepository) return
+      throw new RepositoryError('The configured Pavo path does not exist.')
+    }
+    if (rootStatus.isSymbolicLink() || !rootStatus.isDirectory()) {
+      throw new RepositoryError(
+        'The Pavo repository path must be a regular directory, not a symlink.',
+      )
+    }
+
+    const probe = await this.runGit(
+      ['rev-parse', '--show-toplevel'],
+      { allowFailure: true, operation: 'repository check' },
+    )
+    if (probe.code !== 0) {
+      if (this.config.initializeRepository) return
+      throw new RepositoryError('The configured Pavo path is not a Git repository.')
+    }
+    if ((await realpath(probe.stdout)) !== (await realpath(this.root))) {
+      throw new RepositoryError(
+        'The Pavo repository path must be the root of an independent Git repository.',
+      )
+    }
+
+    const branch = await this.runGit(['symbolic-ref', '--short', 'HEAD'], {
+      allowFailure: true,
+      operation: 'branch check',
+    })
+    if (branch.code !== 0 || branch.stdout !== this.config.branch) {
+      throw new RepositoryError(
+        `The Pavo repository must be checked out on ${this.config.branch}.`,
+      )
+    }
+
+    if (this.config.autoPull || this.config.autoPush) {
+      const remote = await this.runGit(
+        ['remote', 'get-url', this.config.remote],
+        { allowFailure: true, operation: 'remote check' },
+      )
+      if (remote.code !== 0) {
+        throw new RepositoryError(
+          `The Pavo repository does not define the ${this.config.remote} remote.`,
+        )
+      }
+    }
+
+    let currentPath = this.root
+    for (const segment of this.config.dataDirectory.split(path.sep)) {
+      currentPath = path.join(currentPath, segment)
+      const status = await pathStatus(currentPath)
+      if (!status) break
+      if (status.isSymbolicLink() || !status.isDirectory()) {
+        throw new RepositoryError(
+          'Pavo data directories must be regular directories, not symlinks.',
+        )
+      }
+    }
+    const boardStatus = await pathStatus(this.boardPath)
+    if (
+      boardStatus &&
+      (boardStatus.isSymbolicLink() || !boardStatus.isFile())
+    ) {
+      throw new RepositoryError('The Pavo board must be a regular file.')
+    }
+  }
+
   async initialize() {
+    await assertNoSymlinkAncestors(this.root, 'The Pavo repository path')
     await mkdir(this.root, { recursive: true })
+    await assertNoSymlinkAncestors(this.root, 'The Pavo repository path')
     const rootStatus = await lstat(this.root)
     if (rootStatus.isSymbolicLink()) {
-      throw new RepositoryError('The Kanban repository path must not be a symlink.')
+      throw new RepositoryError('The Pavo repository path must not be a symlink.')
     }
 
     const probe = await this.runGit(
@@ -439,7 +568,7 @@ export class GitBoardRepository {
     )
     if (probe.code !== 0) {
       if (!this.config.initializeRepository) {
-        throw new RepositoryError('The configured Kanban path is not a Git repository.')
+        throw new RepositoryError('The configured Pavo path is not a Git repository.')
       }
       await this.runGit(['init', '-b', this.config.branch], {
         operation: 'repository initialization',
@@ -451,7 +580,7 @@ export class GitBoardRepository {
     })
     if ((await realpath(topLevel.stdout)) !== (await realpath(this.root))) {
       throw new RepositoryError(
-        'The Kanban repository path must be the root of an independent Git repository.',
+        'The Pavo repository path must be the root of an independent Git repository.',
       )
     }
     const gitDirectory = await this.runGit(
@@ -466,7 +595,7 @@ export class GitBoardRepository {
     })
     if (branch.stdout !== this.config.branch) {
       throw new RepositoryError(
-        `The Kanban repository must be checked out on ${this.config.branch}.`,
+        `The Pavo repository must be checked out on ${this.config.branch}.`,
       )
     }
 
@@ -477,7 +606,7 @@ export class GitBoardRepository {
       )
       if (remote.code !== 0) {
         throw new RepositoryError(
-          `The Kanban repository does not define the ${this.config.remote} remote.`,
+          `The Pavo repository does not define the ${this.config.remote} remote.`,
         )
       }
     }
@@ -490,7 +619,7 @@ export class GitBoardRepository {
       boardStatus &&
       (boardStatus.isSymbolicLink() || !boardStatus.isFile())
     ) {
-      throw new RepositoryError('The Kanban board must be a regular file.')
+      throw new RepositoryError('The Pavo board must be a regular file.')
     }
   }
 
@@ -513,7 +642,7 @@ export class GitBoardRepository {
     )
     if (status.stdout) {
       throw new RepositoryError(
-        'The Kanban board or ticket files have uncommitted changes. Commit or discard them before continuing.',
+        'The Pavo board or ticket files have uncommitted changes. Commit or discard them before continuing.',
         409,
       )
     }
@@ -523,7 +652,7 @@ export class GitBoardRepository {
     })
     if (staged.stdout) {
       throw new RepositoryError(
-        'The Git index contains staged changes. Commit or unstage them before using Kanban.',
+        'The Git index contains staged changes. Commit or unstage them before using Pavo.',
         409,
       )
     }
@@ -559,7 +688,7 @@ export class GitBoardRepository {
 
     if (afterCommit) {
       throw new RepositoryError(
-        'The board was committed locally, but Git push failed. Kanban will retry synchronization; manual branch reconciliation may be required.',
+        'The board was committed locally, but Git push failed. Pavo will retry synchronization; manual branch reconciliation may be required.',
         503,
       )
     }
@@ -604,17 +733,20 @@ export class GitBoardRepository {
 
     const boardFile = await readRegularFile(
       this.boardPath,
-      'The Kanban board file',
+      'The Pavo board file',
     )
     let document
     try {
       document = JSON.parse(boardFile.source)
     } catch {
-      throw new RepositoryError('The Kanban board file contains invalid JSON.')
+      throw new RepositoryError('The Pavo board file contains invalid JSON.')
     }
 
     try {
-      if (Array.isArray(document.cards)) {
+      if (
+        Array.isArray(document.cards) ||
+        (document.version === 1 && Array.isArray(document.works))
+      ) {
         if (!(await hasFileIdentity(this.boardPath, boardFile.identity))) {
           throw new StaleRevisionError()
         }
@@ -628,15 +760,22 @@ export class GitBoardRepository {
         }
       }
       if (
-        document.version !== BOARD_FORMAT_VERSION ||
-        !Array.isArray(document.tickets)
+        ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
+          document.version,
+        ) ||
+        ([4, BOARD_FORMAT_VERSION].includes(document.version)
+          ? !Array.isArray(document.works)
+          : !Array.isArray(document.tickets))
       ) {
         throw new TypeError(
-          `The board must use split-storage version ${BOARD_FORMAT_VERSION}.`,
+          `The board must use split-storage version ${[...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].join(', ')}.`,
         )
       }
 
-      const placements = document.tickets
+      const projects = document.projects ?? []
+      const placements = ([4, BOARD_FORMAT_VERSION].includes(document.version)
+        ? document.works
+        : document.tickets)
         .map((value, index) => {
           const placement = requireObject(
             value,
@@ -696,7 +835,8 @@ export class GitBoardRepository {
         throw new TypeError('The ticket file set does not match board.json.')
       }
 
-      const cards = []
+      const works = []
+      let legacySplit = document.version !== BOARD_FORMAT_VERSION
       const ticketIdentities = []
       for (const placement of placements) {
         const ticketPath = this.ticketPath(this.root, placement.id)
@@ -708,9 +848,13 @@ export class GitBoardRepository {
           JSON.parse(ticketFile.source),
           `Ticket ${placement.id} must be an object.`,
         )
-        if (ticket.version !== TICKET_FORMAT_VERSION) {
+        if (
+          ![...LEGACY_TICKET_FORMAT_VERSIONS, TICKET_FORMAT_VERSION].includes(
+            ticket.version,
+          )
+        ) {
           throw new TypeError(
-            `Ticket ${placement.id} must use version ${TICKET_FORMAT_VERSION}.`,
+            `Work ${placement.id} must use version ${[...LEGACY_TICKET_FORMAT_VERSIONS, TICKET_FORMAT_VERSION].join(', ')}.`,
           )
         }
         if (ticket.id !== placement.id) {
@@ -722,9 +866,18 @@ export class GitBoardRepository {
           filePath: ticketPath,
           identity: ticketFile.identity,
         })
-        cards.push({
+        if (ticket.version !== TICKET_FORMAT_VERSION) legacySplit = true
+        works.push({
           id: ticket.id,
+          type: ticket.type ?? 'goal',
+          project: ticket.project ?? '',
+          key: ticket.key ?? '',
           title: ticket.title,
+          description: ticket.description ?? ticket.body ?? '',
+          assignee: ticket.assignee ?? '',
+          waterLevel: ticket.waterLevel ?? '0',
+          upstreamWaterLevels: ticket.upstreamWaterLevels ?? {},
+          workflowId: ticket.workflowId ?? ROOT_WORKFLOW_ID,
           columnId: placement.columnId,
           createdAt: ticket.createdAt,
           updatedAt: ticket.updatedAt,
@@ -755,7 +908,13 @@ export class GitBoardRepository {
       }
 
       const board = normalizeBoard(
-        { version: 1, columns: document.columns, cards },
+        {
+          version: 1,
+          projects,
+          columns: document.columns,
+          workflows: document.workflows,
+          works,
+        },
         { workflow: this.config.columns },
       )
       const source = canonicalBoard(board)
@@ -763,12 +922,12 @@ export class GitBoardRepository {
         board,
         source,
         revision: revisionOf(source),
-        format: 'split',
+        format: legacySplit ? 'split-legacy' : 'split-current',
       }
     } catch (error) {
       if (error instanceof StaleRevisionError) throw error
       throw new RepositoryError(
-        `The Kanban data is invalid: ${error.message}`,
+        `The Pavo data is invalid: ${error.message}`,
       )
     }
   }
@@ -783,7 +942,7 @@ export class GitBoardRepository {
       relativeParent.split(path.sep).some((segment) => segment === '..')
     ) {
       throw new RepositoryError(
-        'Kanban refused to write outside the temporary Git worktree.',
+        'Pavo refused to write outside the temporary Git worktree.',
       )
     }
     await ensureSafeDirectory(rootDirectory, relativeParent)
@@ -796,7 +955,7 @@ export class GitBoardRepository {
       })
       const existing = await pathStatus(filePath)
       if (existing?.isSymbolicLink()) {
-        throw new RepositoryError('Kanban data files must not be symlinks.')
+        throw new RepositoryError('Pavo data files must not be symlinks.')
       }
       await rename(temporaryPath, filePath)
     } finally {
@@ -823,7 +982,7 @@ export class GitBoardRepository {
       const nextIds = new Set(documents.ticketDocuments.map((ticket) => ticket.id))
       for (const previous of normalizeBoard(previousBoard, {
         workflow: this.config.columns,
-      }).cards) {
+      }).works) {
         if (!nextIds.has(previous.id)) {
           await rm(this.ticketPath(directory, previous.id), { force: true })
         }
@@ -835,7 +994,7 @@ export class GitBoardRepository {
       board: documents.board,
       source,
       revision: revisionOf(source),
-      format: 'split',
+      format: 'split-current',
     }
   }
 
@@ -844,7 +1003,25 @@ export class GitBoardRepository {
   }
 
   async commitBoardAt(directory, message) {
-    const managedPaths = [this.relativeBoardPath, this.relativeTicketsPath]
+    const trackedTickets = await this.runGitAt(
+      directory,
+      ['ls-files', '--', this.relativeTicketsPath],
+      { operation: 'managed ticket check' },
+    )
+    const ticketFiles = (
+      await readdir(path.join(directory, this.relativeTicketsPath)).catch(
+        (error) => {
+          if (error?.code === 'ENOENT') return []
+          throw error
+        },
+      )
+    ).filter((entry) => entry.endsWith('.json'))
+    const managedPaths = [
+      this.relativeBoardPath,
+      ...(trackedTickets.stdout || ticketFiles.length > 0
+        ? [this.relativeTicketsPath]
+        : []),
+    ]
     await this.runGitAt(directory, ['add', '-A', '--', ...managedPaths], {
       operation: 'staging',
     })
@@ -875,7 +1052,7 @@ export class GitBoardRepository {
       )
     ) {
       throw new RepositoryError(
-        'Kanban refused to commit because the Git index contains unrelated paths.',
+        'Pavo refused to commit because the Git index contains unrelated paths.',
         409,
       )
     }
@@ -931,7 +1108,7 @@ export class GitBoardRepository {
     }
 
     throw new RepositoryError(
-      'Git push failed before the local Kanban branch was changed. Retry when the remote is available.',
+      'Git push failed before the local Pavo branch was changed. Retry when the remote is available.',
       503,
     )
   }
@@ -942,7 +1119,7 @@ export class GitBoardRepository {
     })
     const worktreePath = path.join(
       os.tmpdir(),
-      `dddrop-kanban-worktree-${process.pid}-${randomUUID()}`,
+      `dddrop-pavo-worktree-${process.pid}-${randomUUID()}`,
     )
 
     try {
@@ -964,7 +1141,7 @@ export class GitBoardRepository {
       })
       if (prePushHead.stdout !== base.stdout) {
         throw new RepositoryError(
-          'The local Kanban branch changed during the mutation.',
+          'The local Pavo branch changed during the mutation.',
           409,
         )
       }
@@ -975,7 +1152,7 @@ export class GitBoardRepository {
       })
       if (currentHead.stdout !== base.stdout) {
         throw new RepositoryError(
-          'The local Kanban branch changed during the mutation.',
+          'The local Pavo branch changed during the mutation.',
           409,
         )
       }
@@ -986,7 +1163,7 @@ export class GitBoardRepository {
       const applied = await this.readBoard()
       if (!applied) {
         throw new RepositoryError(
-          'The committed Kanban board could not be read after synchronization.',
+          'The committed Pavo board could not be read after synchronization.',
         )
       }
       return applied
@@ -1007,7 +1184,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'refactor(kanban): split ticket storage',
+      'refactor(pavo): add root workflow containers',
       snapshot.board,
     )
     this.cachedSnapshot = migrated
@@ -1017,7 +1194,7 @@ export class GitBoardRepository {
   }
 
   async ensureSplitSnapshot(snapshot) {
-    if (!snapshot || snapshot.format === 'split') return snapshot
+    if (!snapshot || snapshot.format === 'split-current') return snapshot
     if (this.config.autoPull && !this.config.autoPush) return snapshot
     return this.migrateLegacyBoard(snapshot)
   }
@@ -1028,9 +1205,9 @@ export class GitBoardRepository {
 
     await this.assertCleanBoardPath()
     const written = await this.writeBoard(
-      createDefaultBoard({ id: randomUUID(), workflow: this.config.columns }),
+      createDefaultBoard({ id: uuidv7(), workflow: this.config.columns }),
     )
-    await this.commitBoard('feat(kanban): initialize board')
+    await this.commitBoard('feat(pavo): initialize board')
     await this.push({ afterCommit: true })
     return written
   }
@@ -1059,7 +1236,7 @@ export class GitBoardRepository {
         this.lastSyncError =
           error instanceof Error
             ? error.message
-            : 'Kanban background synchronization failed.'
+            : 'Pavo background synchronization failed.'
       })
       .finally(() => {
         if (this.backgroundSync === pending) this.backgroundSync = undefined
@@ -1106,7 +1283,7 @@ export class GitBoardRepository {
         normalizeBoard(nextBoard, { workflow: this.config.columns }),
       )
       if (nextSource === snapshot.source) {
-        throw new RepositoryError('The Kanban mutation did not change the board.', 400)
+        throw new RepositoryError('The Pavo mutation did not change the board.', 400)
       }
 
       await this.assertCleanBoardPath()

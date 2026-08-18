@@ -1,0 +1,429 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import {
+  DEFAULT_WORKFLOW,
+  ROOT_WORKFLOW_ID,
+  addProject,
+  addWork,
+  addWorkflow,
+  compareWaterLevels,
+  createDefaultBoard,
+  moveWork,
+  normalizeBoard,
+  normalizeWorkflow,
+  removeProject,
+  removeWork,
+  removeWorkflow,
+  updateWork,
+  updateWorkflow,
+} from '../src/board.js'
+import { Config, inject, name } from '../src/index.js'
+import { createUuidV7Generator } from '../src/uuid-v7.js'
+
+const fixedTime = '2026-01-01T00:00:00.000Z'
+
+function createBoard() {
+  return addProject(
+    createDefaultBoard({ id: 'welcome-work', now: fixedTime }),
+    { project: 'Harness' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+}
+
+function workInput(overrides = {}) {
+  return {
+    id: 'new-work',
+    type: 'goal',
+    project: 'Harness',
+    key: 'DSH-42',
+    title: 'Ship the Pavo plugin',
+    description: 'Persist every field in Git.',
+    assignee: 'Ada',
+    waterLevel: '123456789012345678901234567890.1250',
+    upstreamWaterLevels: {},
+    columnId: 'ready',
+    createdAt: fixedTime,
+    ...overrides,
+  }
+}
+
+test('creates the configured five-column board with a Goal Work', () => {
+  const board = createBoard()
+  assert.deepEqual(
+    board.columns.map((column) => column.title),
+    ['Backlog', 'Ready', 'In Progress', 'Review', 'Done'],
+  )
+  assert.deepEqual(board.projects, ['Harness'])
+  assert.deepEqual(
+    board.workflows.map(({ id, title, parentWorkflowId }) => ({
+      id,
+      title,
+      parentWorkflowId,
+    })),
+    [{ id: ROOT_WORKFLOW_ID, title: 'Root Workflow', parentWorkflowId: null }],
+  )
+  assert.equal(board.works[0].id, 'welcome-work')
+  assert.equal(board.works[0].workflowId, ROOT_WORKFLOW_ID)
+  assert.equal(board.works[0].type, 'goal')
+  assert.equal(board.works[0].description, '')
+  assert.equal(board.works[0].waterLevel, '0')
+  assert.deepEqual(board.works[0].upstreamWaterLevels, {})
+})
+
+test('adds, edits, moves, and removes a Work without mutating inputs', () => {
+  const original = createBoard()
+  const added = addWork(original, workInput(), { workflow: DEFAULT_WORKFLOW })
+  assert.equal(original.works.length, 1)
+  assert.equal(added.works.length, 2)
+  assert.equal(
+    added.works.find((work) => work.id === 'new-work').waterLevel,
+    '123456789012345678901234567890.125',
+  )
+
+  const edited = updateWork(
+    added,
+    {
+      workId: 'new-work',
+      ...workInput({
+        type: 'ongoing',
+        title: 'Maintain the Git-backed Pavo plugin',
+        description: 'Keep every field synchronized.',
+        waterLevel: '999999999999999999999999999999999999999999',
+        upstreamWaterLevels: { 'welcome-work': '0001.2500' },
+      }),
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  const work = edited.works.find((candidate) => candidate.id === 'new-work')
+  assert.equal(work.type, 'ongoing')
+  assert.equal(work.description, 'Keep every field synchronized.')
+  assert.deepEqual(work.upstreamWaterLevels, { 'welcome-work': '1.25' })
+
+  const moved = moveWork(
+    edited,
+    { workId: 'new-work', columnId: 'in-progress' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  assert.equal(
+    moved.works.find((candidate) => candidate.id === 'new-work').columnId,
+    'in-progress',
+  )
+  assert.throws(
+    () => removeWork(moved, { workId: 'welcome-work' }),
+    /still referenced by Work new-work/,
+  )
+  const detached = updateWork(
+    moved,
+    { workId: 'new-work', ...work, upstreamWaterLevels: {} },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  const removed = removeWork(detached, { workId: 'welcome-work' })
+  assert.deepEqual(removed.works.map((candidate) => candidate.id), ['new-work'])
+})
+
+test('accepts forward references and cyclic Work dependencies', () => {
+  const board = normalizeBoard({
+    version: 1,
+    projects: ['Pavo'],
+    columns: DEFAULT_WORKFLOW,
+    works: [
+      {
+        id: 'code',
+        type: 'goal',
+        project: 'Pavo',
+        key: 'PAVO-1',
+        title: 'Implement',
+        description: 'Address review feedback.',
+        waterLevel: '12',
+        upstreamWaterLevels: { review: '5' },
+        columnId: 'in-progress',
+      },
+      {
+        id: 'review',
+        type: 'ongoing',
+        project: 'Pavo',
+        key: 'PAVO-2',
+        title: 'Review',
+        description: 'Review the implementation.',
+        waterLevel: '6',
+        upstreamWaterLevels: { code: '12' },
+        columnId: 'review',
+      },
+    ],
+  })
+  assert.deepEqual(board.works[0].upstreamWaterLevels, { review: '5' })
+  assert.deepEqual(board.works[1].upstreamWaterLevels, { code: '12' })
+})
+
+test('rejects unknown and self dependencies without applying DAG rules', () => {
+  assert.throws(
+    () => addWork(createBoard(), workInput({ upstreamWaterLevels: { missing: '1' } })),
+    /unknown upstream Work/,
+  )
+  assert.throws(
+    () => addWork(createBoard(), workInput({ upstreamWaterLevels: { 'new-work': '1' } })),
+    /must not depend on itself/,
+  )
+  assert.throws(
+    () =>
+      addWork(
+        createBoard(),
+        workInput({
+          upstreamWaterLevels: Object.fromEntries([
+            [' welcome-work ', '1'],
+            ['welcome-work', '1'],
+          ]),
+        }),
+      ),
+    /repeats upstream Work/,
+  )
+})
+
+test('normalizes legacy cards and body fields into Works', () => {
+  const board = normalizeBoard({
+    version: 1,
+    projects: [],
+    columns: DEFAULT_WORKFLOW,
+    cards: [
+      {
+        id: 'legacy-card',
+        title: 'Legacy title',
+        body: 'Legacy body',
+        columnId: 'backlog',
+      },
+    ],
+  })
+  assert.equal(board.cards, undefined)
+  assert.deepEqual(
+    {
+      type: board.works[0].type,
+      description: board.works[0].description,
+      upstreamWaterLevels: board.works[0].upstreamWaterLevels,
+      project: board.works[0].project,
+      key: board.works[0].key,
+    },
+    {
+      type: 'goal',
+      description: 'Legacy body',
+      upstreamWaterLevels: {},
+      project: '',
+      key: '',
+    },
+  )
+  assert.throws(
+    () => normalizeBoard({ ...board, cards: [] }),
+    /must not define both cards and works/,
+  )
+})
+
+test('allows Project and KEY to be empty on create and edit', () => {
+  const created = addWork(
+    createBoard(),
+    workInput({ project: '', key: '' }),
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  const work = created.works.find((candidate) => candidate.id === 'new-work')
+  assert.equal(work.project, '')
+  assert.equal(work.key, '')
+
+  const populated = updateWork(
+    created,
+    { ...work, workId: work.id, project: 'Harness', key: 'DSH-42' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  const current = populated.works.find((candidate) => candidate.id === work.id)
+  const cleared = updateWork(
+    populated,
+    { ...current, workId: current.id, project: '', key: '' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  const clearedWork = cleared.works.find((candidate) => candidate.id === work.id)
+  assert.equal(clearedWork.project, '')
+  assert.equal(clearedWork.key, '')
+})
+
+test('creates nested Workflows and assigns Works without changing dependency semantics', () => {
+  const withRelease = addWorkflow(createBoard(), {
+    id: 'release',
+    title: 'Release 1.0',
+    parentWorkflowId: ROOT_WORKFLOW_ID,
+    createdAt: fixedTime,
+  })
+  const nested = addWorkflow(withRelease, {
+    id: 'client',
+    title: 'Client',
+    parentWorkflowId: 'release',
+    createdAt: fixedTime,
+  })
+  const withWork = addWork(
+    nested,
+    workInput({ workflowId: 'client' }),
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  assert.equal(
+    withWork.works.find((work) => work.id === 'new-work').workflowId,
+    'client',
+  )
+
+  const reassigned = updateWork(
+    withWork,
+    {
+      workId: 'new-work',
+      ...workInput({
+        workflowId: 'release',
+        upstreamWaterLevels: { 'welcome-work': '0' },
+      }),
+    },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  assert.equal(reassigned.works[1].workflowId, 'release')
+  assert.deepEqual(reassigned.works[1].upstreamWaterLevels, {
+    'welcome-work': '0',
+  })
+  assert.throws(
+    () => removeWorkflow(reassigned, { workflowId: 'release' }),
+    /contains child Workflows|contains Works/,
+  )
+  const withoutWork = removeWork(reassigned, { workId: 'new-work' })
+  const withoutChild = removeWorkflow(withoutWork, { workflowId: 'client' })
+  assert.equal(
+    removeWorkflow(withoutChild, { workflowId: 'release' }).workflows.length,
+    1,
+  )
+})
+
+test('rejects invalid Workflow trees and protects the fixed Root Workflow', () => {
+  assert.throws(
+    () => addWorkflow(createBoard(), {
+      id: 'orphan',
+      title: 'Orphan',
+      parentWorkflowId: 'missing',
+    }),
+    /Unknown parent Workflow/,
+  )
+  assert.throws(
+    () => addWork(createBoard(), workInput({ workflowId: 'missing' })),
+    /unknown Workflow/,
+  )
+  assert.throws(
+    () => updateWorkflow(createBoard(), {
+      workflowId: ROOT_WORKFLOW_ID,
+      title: 'Renamed Root',
+    }),
+    /cannot be changed/,
+  )
+  assert.throws(
+    () => removeWorkflow(createBoard(), { workflowId: ROOT_WORKFLOW_ID }),
+    /cannot be deleted/,
+  )
+
+  const nested = addWorkflow(
+    addWorkflow(createBoard(), {
+      id: 'left',
+      title: 'Left',
+      parentWorkflowId: ROOT_WORKFLOW_ID,
+    }),
+    { id: 'right', title: 'Right', parentWorkflowId: 'left' },
+  )
+  assert.throws(
+    () => updateWorkflow(nested, {
+      workflowId: 'left',
+      parentWorkflowId: 'right',
+      title: 'Left',
+    }),
+    /parent cycle/,
+  )
+  assert.throws(
+    () => normalizeBoard({
+      ...nested,
+      workflows: nested.workflows.map((workflow) =>
+        workflow.id === ROOT_WORKFLOW_ID
+          ? { ...workflow, title: 'Another Root' }
+          : workflow,
+      ),
+    }),
+    /Root Workflow title and parent are fixed/,
+  )
+})
+
+test('compares arbitrary-precision WaterLevels without floating point', () => {
+  assert.equal(compareWaterLevels('999999999999999999999999', '10'), 1)
+  assert.equal(compareWaterLevels('1.2300', '1.23'), 0)
+  assert.equal(compareWaterLevels('0.0000000000000000001', '0.0000000000000000002'), -1)
+  assert.throws(() => compareWaterLevels('1e3', '1000'), /without an exponent/)
+})
+
+test('manages Project options and protects referenced Projects', () => {
+  const board = createBoard()
+  const withWork = addWork(board, workInput(), { workflow: DEFAULT_WORKFLOW })
+  assert.throws(
+    () => removeProject(withWork, { project: 'Harness' }),
+    /still used by one or more Works/,
+  )
+  const withoutWork = removeWork(withWork, { workId: 'new-work' })
+  assert.deepEqual(
+    removeProject(withoutWork, { project: 'Harness' }).projects,
+    [],
+  )
+})
+
+test('enforces workflow transitions and Work field validation', () => {
+  const board = addWork(
+    createBoard(),
+    workInput({ columnId: 'backlog' }),
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  assert.throws(
+    () => moveWork(board, { workId: 'new-work', columnId: 'in-progress' }),
+    /cannot move/,
+  )
+  assert.throws(
+    () => addWork(createBoard(), workInput({ type: 'task' })),
+    /goal or ongoing/,
+  )
+  assert.throws(
+    () => addWork(createBoard(), workInput({ columnId: 'missing' })),
+    /Unknown column/,
+  )
+  assert.throws(
+    () => addWork(createBoard(), workInput({ waterLevel: '-1' })),
+    /non-negative decimal/,
+  )
+  assert.throws(
+    () => normalizeWorkflow([{ id: 'a', title: 'A', allowedTransitions: ['missing'] }]),
+    /unknown transition/,
+  )
+})
+
+test('generates monotonic UUIDv7 identifiers across clock regressions', () => {
+  let now = 1_700_000_000_000
+  const randomValues = [new Uint8Array(10), new Uint8Array(10), new Uint8Array(10)]
+  const uuid = createUuidV7Generator({
+    now: () => now,
+    randomBytes: () => randomValues.shift(),
+  })
+  const first = uuid()
+  const second = uuid()
+  now -= 1_000
+  const afterClockRegression = uuid()
+  assert.match(
+    first,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+  )
+  assert.equal(first < second, true)
+  assert.equal(second < afterClockRegression, true)
+})
+
+test('declares a statically configured Host plugin', () => {
+  assert.equal(name, 'dddrop-pavo')
+  assert.deepEqual(inject, ['webServer', 'webRuntime'])
+  const valid = Config['~standard'].validate({
+    repositoryPath: '/tmp/pavo-data',
+    autoPull: false,
+    autoPush: false,
+  })
+  assert.equal(valid.issues, undefined)
+  assert.equal(valid.value.columns.length, 5)
+})

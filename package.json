@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Version-controlled DeepSeek Harness plugins, agent presets, and profile configuration.",
   "scripts": {
-    "build": "node plugins/theme-blue/scripts/build-client.mjs && node plugins/kanban/scripts/build-client.mjs",
+    "build": "node plugins/theme-blue/scripts/build-client.mjs && node plugins/pavo/scripts/build-client.mjs",
     "setup": "node scripts/install.mjs",
     "link:presets": "node scripts/link-presets.mjs",
     "sync:profile": "node scripts/sync-profile.mjs",

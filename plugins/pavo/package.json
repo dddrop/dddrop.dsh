@@ -1,9 +1,9 @@
 {
-  "name": "@dddrop/dsh-plugin-kanban",
-  "version": "0.2.0",
+  "name": "@dddrop/dsh-plugin-pavo",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
-  "description": "A Git-backed Kanban board for the DeepSeek Harness Web interface.",
+  "description": "A Git-backed Work board and nested Workflow canvas for the DeepSeek Harness Web interface.",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
@@ -13,7 +13,8 @@
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
       ],
       "platform": "web"
     }
@@ -32,7 +33,15 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6",
-    "react": "^18.2.0"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@xyflow/react": "12.11.3",
+    "esbuild": "0.28.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   }
 }

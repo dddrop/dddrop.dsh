@@ -19,9 +19,9 @@ Version-controlled DeepSeek Harness plugins, agent presets, related skills, and 
 
 `plugins/theme-blue` provides persistent blue Light and Dark palettes, compact typography, and restrained corner geometry while preserving the built-in appearance controls and elevation. See `plugins/theme-blue/README.md` for its design tokens and lifecycle.
 
-### Kanban
+### Pavo
 
-`plugins/kanban` provides one shared, Git-backed board in the conversation view. Static profile configuration defines its columns, movement rules, repository checkout, and pull/push policy. See `plugins/kanban/README.md` for architecture, synchronization, and installation details.
+`plugins/pavo` provides one shared, Git-backed Work board with Kanban and a Workflow-scoped dependency Flow Canvas. The canvas opens at a fixed Root Workflow and supports nested Workflow containers, breadcrumb navigation, Goal and Ongoing Works, arbitrary-precision WaterLevels, cyclic upstream relationships across Workflow boundaries, passive Agent tools, repository settings, and Project values. See `plugins/pavo/README.md` for the Work and Workflow models, architecture, compatibility, synchronization, and installation details.
 
 ## Requirements
 

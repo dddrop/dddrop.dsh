@@ -21,7 +21,7 @@ test('web profile manifest is valid', async () => {
 
   assert.equal(manifest.profile, 'web')
   assert.deepEqual(manifest.plugins, [
-    '../../plugins/kanban',
+    '../../plugins/pavo',
     '../../plugins/theme-blue',
   ])
 })

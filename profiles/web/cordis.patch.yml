@@ -5,10 +5,10 @@
 - insert:
     - id: dddrop-theme-blue
       name: '@dddrop/dsh-plugin-theme-blue'
-    - id: dddrop-kanban
-      name: '@dddrop/dsh-plugin-kanban'
+    - id: dddrop-pavo
+      name: '@dddrop/dsh-plugin-pavo'
       config:
-        repositoryPath: !!js "process.env.KANBAN_REPOSITORY_PATH ?? process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:os').homedir(), 'Development', 'dddrop.dsh.data')"
+        repositoryPath: !!js "process.env.PAVO_REPOSITORY_PATH ?? process.env.KANBAN_REPOSITORY_PATH ?? process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:os').homedir(), 'Development', 'dddrop.dsh.data')"
         dataDirectory: kanban
         branch: main
         remote: origin
