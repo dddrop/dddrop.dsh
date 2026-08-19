@@ -65,7 +65,7 @@ async function git(repositoryPath, ...args) {
   return result.stdout.trim()
 }
 
-function createContext(registerRoute, registerTool) {
+function createContext(registerRoute, registerTool, agentPresets) {
   const tools = registerTool
     ? {
         register(tool) {
@@ -78,6 +78,7 @@ function createContext(registerRoute, registerTool) {
     get(service) {
       if (service === 'webRuntime') return { trustedHosts: [] }
       if (service === 'tools') return tools
+      if (service === 'agentPresets') return agentPresets
       return undefined
     },
     webServer: {
@@ -150,7 +151,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
       key: 'DSH-101',
       title: 'Validate Git persistence',
       body: 'Ensure every card field is persisted.',
-      assignee: 'Ada',
+      assignee: { kind: 'human' },
       waterLevel: '123456789012345678901234567890',
       columnId: 'ready',
       expectedRevision: configured.payload.value.revision,
@@ -170,7 +171,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
       'Ensure every card field is persisted.',
     )
     assert.deepEqual(addedCard.upstreamWaterLevels, {})
-    assert.equal(addedCard.assignee, 'Ada')
+    assert.deepEqual(addedCard.assignee, { kind: 'human' })
     assert.equal(addedCard.waterLevel, '123456789012345678901234567890')
     assert.match(
       addedCard.id,
@@ -199,7 +200,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
       key: 'DSH-101A',
       title: 'Validate commits and pushes',
       description: 'Ensure every Work field update is persisted.',
-      assignee: 'Grace',
+      assignee: { kind: 'agent-preset', presetId: 'cordis' },
       waterLevel: '999999999999999999999999999999.5',
       upstreamWaterLevels: { [welcomeWorkId]: '0' },
       expectedRevision: added.payload.value.revision,
@@ -209,6 +210,10 @@ test('serves one global Git-backed board and commits every mutation', async () =
       (work) => work.id === addedCard.id,
     )
     assert.equal(editedWork.type, 'ongoing')
+    assert.deepEqual(editedWork.assignee, {
+      kind: 'agent-preset',
+      presetId: 'cordis',
+    })
     assert.deepEqual(editedWork.upstreamWaterLevels, { [welcomeWorkId]: '0' })
 
     const selfDependency = await call(route, 'updateWork', {
@@ -243,7 +248,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.version, 6)
+    assert.equal(board.version, 7)
     assert.deepEqual(board.projects, ['Harness'])
     assert.equal(board.cards, undefined)
     assert.equal(board.tickets, undefined)
@@ -259,7 +264,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
         'utf8',
       ),
     )
-    assert.equal(welcomeTicket.version, 4)
+    assert.equal(welcomeTicket.version, 5)
     assert.equal(welcomeTicket.id, board.works[0].id)
     assert.equal(welcomeTicket.type, 'goal')
     assert.equal(welcomeTicket.description, '')
@@ -416,6 +421,69 @@ test('serves shared template CRUD and passive instantiation', async () => {
   }
 })
 
+test('serves a sanitized Agent Preset roster for Assignee selection', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-agent-presets-'))
+  const routes = []
+  const agentPresets = {
+    async list() {
+      return [
+        {
+          id: 'standard',
+          name: 'Standard',
+          description: 'General-purpose Agent.',
+          trust: 'system',
+          path: '/private/deployment/standard/cordis.yml',
+        },
+        {
+          id: 'broken-preset',
+          trust: 'user',
+          path: '/private/user/broken/cordis.yml',
+          broken: 'Composition is invalid.',
+        },
+      ]
+    },
+  }
+  try {
+    await apply(
+      createContext(
+        (registered) => routes.push(registered),
+        undefined,
+        agentPresets,
+      ),
+      {
+        repositoryPath: root,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath: path.join(root, '.pavo-settings.json'),
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const response = await call(route, 'agentPresets')
+    assert.equal(response.response.status, 200, response.response.body)
+    assert.deepEqual(response.payload.value.presets, [
+      {
+        id: 'standard',
+        name: 'Standard',
+        description: 'General-purpose Agent.',
+        trust: 'system',
+      },
+      {
+        id: 'broken-preset',
+        trust: 'user',
+        broken: true,
+      },
+    ])
+    assert.equal(JSON.stringify(response.payload.value).includes('/private/'), false)
+    assert.equal(
+      JSON.stringify(response.payload.value).includes('Composition is invalid.'),
+      false,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('registers passive Agent tools for reading and updating Works', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-tools-'))
   const routes = []
@@ -468,6 +536,7 @@ test('registers passive Agent tools for reading and updating Works', async () =>
     assert.deepEqual(listed.projects, [])
     assert.equal(listed.workflows[0].title, 'Root Workflow')
     assert.equal(listed.works[0].workflowId, 'root')
+    assert.deepEqual(listed.agentPresets, [])
     assert.match(listTool.output.render({}, listed)[0].text, new RegExp(listed.works[0].id))
 
     assert.throws(
@@ -493,11 +562,18 @@ test('registers passive Agent tools for reading and updating Works', async () =>
       workId: read.work.id,
       type: 'ongoing',
       description: 'Maintain this Work continuously.',
+      assignee: { kind: 'human' },
       waterLevel: '1000000000000000000000000000000.25',
     })
     assert.equal(updated.work.type, 'ongoing')
     assert.equal(updated.work.description, 'Maintain this Work continuously.')
+    assert.deepEqual(updated.work.assignee, { kind: 'human' })
     assert.equal(updated.work.waterLevel, '1000000000000000000000000000000.25')
+    const humanAssigned = await listTool.execute({
+      assignee: { kind: 'human' },
+    })
+    assert.equal(humanAssigned.total, 1)
+    assert.equal(humanAssigned.works[0].id, updated.work.id)
 
     await assert.rejects(
       updateTool.execute({

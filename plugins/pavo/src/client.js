@@ -258,7 +258,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       key: '',
       title: '',
       description: '',
-      assignee: '',
+      assignee: { kind: 'unassigned' },
       waterLevel: '0',
       upstreamWaterLevels: {},
     }
@@ -284,10 +284,10 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       'key',
       'title',
       'description',
-      'assignee',
       'waterLevel',
     ]
     if (fields.some((name) => work[name] !== draft[name])) return false
+    if (JSON.stringify(work.assignee) !== JSON.stringify(draft.assignee)) return false
     const left = Object.entries(work.upstreamWaterLevels)
     const right = Object.entries(draft.upstreamWaterLevels)
     return (
@@ -321,6 +321,98 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     return nodes
   }
 
+  function assigneeValue(assignee) {
+    if (assignee?.kind === 'human') return 'human'
+    if (assignee?.kind === 'agent-preset') {
+      return `agent-preset:${assignee.presetId}`
+    }
+    if (assignee?.legacyLabel) return 'legacy'
+    return 'unassigned'
+  }
+
+  function assigneeFromValue(value) {
+    if (value === 'human') return { kind: 'human' }
+    if (value.startsWith('agent-preset:')) {
+      return { kind: 'agent-preset', presetId: value.slice('agent-preset:'.length) }
+    }
+    return { kind: 'unassigned' }
+  }
+
+  function assigneeLabel(assignee, agentPresets) {
+    if (assignee?.kind === 'human') return 'Me'
+    if (assignee?.kind === 'agent-preset') {
+      const preset = agentPresets.find(
+        (candidate) => candidate.id === assignee.presetId,
+      )
+      if (!preset) return `Unavailable Agent Preset · ${assignee.presetId}`
+      return `${preset.name || preset.id}${preset.broken ? ' · unavailable' : ''}`
+    }
+    if (assignee?.legacyLabel) {
+      return `Unassigned · previous label: ${assignee.legacyLabel}`
+    }
+    return 'Unassigned'
+  }
+
+  function assigneeOptions(agentPresets, currentAssignee) {
+    const nodes = [
+      React.createElement('option', { key: 'unassigned', value: 'unassigned' }, 'Unassigned'),
+      React.createElement('option', { key: 'human', value: 'human' }, 'Me (human)'),
+    ]
+    if (currentAssignee?.legacyLabel) {
+      nodes.push(
+        React.createElement(
+          'option',
+          { key: 'legacy', value: 'legacy' },
+          `Unassigned · previous label: ${currentAssignee.legacyLabel}`,
+        ),
+      )
+    }
+    const currentPresetId =
+      currentAssignee?.kind === 'agent-preset'
+        ? currentAssignee.presetId
+        : undefined
+    if (
+      currentPresetId &&
+      !agentPresets.some((preset) => preset.id === currentPresetId)
+    ) {
+      nodes.push(
+        React.createElement(
+          'option',
+          { key: `missing:${currentPresetId}`, value: `agent-preset:${currentPresetId}` },
+          `Unavailable Agent Preset · ${currentPresetId}`,
+        ),
+      )
+    }
+    for (const preset of agentPresets) {
+      nodes.push(
+        React.createElement(
+          'option',
+          {
+            key: preset.id,
+            value: `agent-preset:${preset.id}`,
+            disabled: Boolean(preset.broken),
+          },
+          `${preset.name || preset.id}${preset.broken ? ' · unavailable' : ''}`,
+        ),
+      )
+    }
+    return nodes
+  }
+
+  function assigneeControl({ assignee, agentPresets, busy, onChange }) {
+    return React.createElement(
+      'select',
+      {
+        className: 'pavo-select',
+        value: assigneeValue(assignee),
+        disabled: busy,
+        'data-testid': 'pavo-assignee-select',
+        onChange: (event) => onChange(assigneeFromValue(event.target.value)),
+      },
+      assigneeOptions(agentPresets, assignee),
+    )
+  }
+
   function workflowPath(workflows, workflowId) {
     const byId = new Map(workflows.map((workflow) => [workflow.id, workflow]))
     const result = []
@@ -349,6 +441,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     setDraft,
     projects,
     workflows,
+    agentPresets,
     busy,
     compact = false,
   }) {
@@ -418,12 +511,12 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       ),
       field(
         'Assignee',
-        React.createElement('input', {
-          className: 'pavo-input',
-          value: draft.assignee,
-          disabled: busy,
-          maxLength: 256,
-          onChange: update('assignee'),
+        assigneeControl({
+          assignee: draft.assignee,
+          agentPresets,
+          busy,
+          onChange: (assignee) =>
+            setDraft((current) => ({ ...current, assignee })),
         }),
       ),
       field(
@@ -543,6 +636,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     columns,
     projects,
     workflows,
+    agentPresets,
     draft,
     setDraft,
     targetColumn,
@@ -628,6 +722,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               setDraft,
               projects,
               workflows,
+              agentPresets,
               busy,
               compact: true,
             }),
@@ -906,7 +1001,14 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     return `${prefix}-${Date.now().toString(36)}-${templateDraftIdSequence}`
   }
 
-  function WorkflowTemplateEditor({ draft, setDraft, projects, columns, busy }) {
+  function WorkflowTemplateEditor({
+    draft,
+    setDraft,
+    projects,
+    columns,
+    agentPresets,
+    busy,
+  }) {
     const content = draft.content
     if (!content) return null
     const setContent = (updater) =>
@@ -969,7 +1071,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
             key: '',
             title: 'New Work',
             description: '',
-            assignee: '',
+            assignee: { kind: 'unassigned' },
             waterLevel: '0',
             upstreamWaterLevels: {},
             workflowId: current.rootWorkflowId,
@@ -1136,9 +1238,12 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                     className: 'pavo-input', value: work.key, disabled: busy, maxLength: 128,
                     onChange: (event) => updateTemplateWork(work.id, 'key', event.target.value),
                   })),
-                  field('Assignee', React.createElement('input', {
-                    className: 'pavo-input', value: work.assignee, disabled: busy, maxLength: 256,
-                    onChange: (event) => updateTemplateWork(work.id, 'assignee', event.target.value),
+                  field('Assignee', assigneeControl({
+                    assignee: work.assignee,
+                    agentPresets,
+                    busy,
+                    onChange: (assignee) =>
+                      updateTemplateWork(work.id, 'assignee', assignee),
                   })),
                   field('WaterLevel', React.createElement('input', {
                     className: 'pavo-input', value: work.waterLevel, disabled: busy, inputMode: 'decimal',
@@ -1206,6 +1311,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     projects,
     columns,
     workflows,
+    agentPresets,
     draft,
     setDraft,
     targetWorkflowId,
@@ -1478,9 +1584,12 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                           className: 'pavo-input', value: draft.title, disabled: busy,
                           maxLength: 500, onChange: update('title'),
                         })),
-                        field('Assignee', React.createElement('input', {
-                          className: 'pavo-input', value: draft.assignee, disabled: busy,
-                          maxLength: 256, onChange: update('assignee'),
+                        field('Assignee', assigneeControl({
+                          assignee: draft.assignee,
+                          agentPresets,
+                          busy,
+                          onChange: (assignee) =>
+                            setDraft((current) => ({ ...current, assignee })),
                         })),
                         field('WaterLevel', React.createElement('input', {
                           className: 'pavo-input', value: draft.waterLevel, disabled: busy,
@@ -1511,6 +1620,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                         setDraft,
                         projects,
                         columns,
+                        agentPresets,
                         busy,
                       })
                     : null,
@@ -1697,6 +1807,26 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
 
   const FLOW_NODE_TYPES = { work: WorkNode, workflow: WorkflowNode }
   const FLOW_POSITIONS_KEY = '@dddrop/dsh-plugin-pavo/flow-positions:v2'
+  const VIEW_MODE_KEY = '@dddrop/dsh-plugin-pavo/view-mode:v1'
+
+  function readViewMode() {
+    if (typeof localStorage === 'undefined') return 'flow'
+    try {
+      const value = localStorage.getItem(VIEW_MODE_KEY)
+      return value === 'board' || value === 'flow' ? value : 'flow'
+    } catch {
+      return 'flow'
+    }
+  }
+
+  function writeViewMode(viewMode) {
+    if (typeof localStorage === 'undefined') return
+    try {
+      localStorage.setItem(VIEW_MODE_KEY, viewMode)
+    } catch {
+      // Browser storage can be disabled without affecting Pavo navigation.
+    }
+  }
 
   function readFlowPositions(layoutKey) {
     if (typeof localStorage === 'undefined') return {}
@@ -1847,6 +1977,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     onSaveWorkTemplate,
     onSaveWorkflowTemplate,
     onUpdateDependencies,
+    agentPresets,
     busy,
     layoutKey,
   }) {
@@ -2087,7 +2218,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                   React.createElement(
                     'span',
                     null,
-                    `${selected.key || 'NO KEY'} · WaterLevel ${selected.waterLevel}`,
+                    `${selected.key || 'NO KEY'} · ${assigneeLabel(selected.assignee, agentPresets)} · WaterLevel ${selected.waterLevel}`,
                   ),
                 ),
                 React.createElement(
@@ -2287,6 +2418,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
 
   function Board() {
     const [snapshot, setSnapshot] = React.useState(null)
+    const [agentPresets, setAgentPresets] = React.useState([])
     const [error, setError] = React.useState(null)
     const [busy, setBusy] = React.useState(false)
     const [drawerMode, setDrawerMode] = React.useState('')
@@ -2294,7 +2426,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     const [drawerRevision, setDrawerRevision] = React.useState('')
     const [drawerDraft, setDrawerDraft] = React.useState(() => emptyDraft())
     const [targetColumn, setTargetColumn] = React.useState('')
-    const [viewMode, setViewMode] = React.useState('flow')
+    const [viewMode, setViewMode] = React.useState(() => readViewMode())
     const [currentWorkflowId, setCurrentWorkflowId] = React.useState(ROOT_WORKFLOW_ID)
     const [selectedFlowNodeId, setSelectedFlowNodeId] = React.useState('')
     const [workflowDrawerMode, setWorkflowDrawerMode] = React.useState('')
@@ -2331,8 +2463,16 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         if (background) pollInFlight.current = true
         const sequence = ++requestSequence.current
         try {
-          const next = await request('overview', {})
-          if (sequence === requestSequence.current) applySnapshot(next)
+          const [next, presetResult] = await Promise.all([
+            request('overview', {}),
+            request('agentPresets', {}).catch(() => ({ presets: [] })),
+          ])
+          if (sequence === requestSequence.current) {
+            setAgentPresets(
+              Array.isArray(presetResult.presets) ? presetResult.presets : [],
+            )
+            applySnapshot(next)
+          }
         } catch (nextError) {
           if (sequence === requestSequence.current) {
             setError(
@@ -2460,6 +2600,11 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         closeDrawer()
       }
     }, [drawerWorkId, snapshot])
+
+    function selectViewMode(nextViewMode) {
+      writeViewMode(nextViewMode)
+      setViewMode(nextViewMode)
+    }
 
     function friendlyMoveError(nextError) {
       const message =
@@ -2641,7 +2786,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               key: '',
               title: '',
               description: '',
-              assignee: '',
+              assignee: { kind: 'unassigned' },
               waterLevel: '0',
               columnId: snapshot.board.columns[0]?.id || '',
             }
@@ -2723,7 +2868,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
           key: templateDraft.key.trim(),
           title: templateDraft.title.trim(),
           description: templateDraft.description,
-          assignee: templateDraft.assignee.trim(),
+          assignee: templateDraft.assignee,
           waterLevel: templateDraft.waterLevel.trim(),
           columnId: templateDraft.columnId,
         }
@@ -2801,7 +2946,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         key: drawerDraft.key.trim(),
         title: drawerDraft.title.trim(),
         description: drawerDraft.description,
-        assignee: drawerDraft.assignee.trim(),
+        assignee: drawerDraft.assignee,
         waterLevel: drawerDraft.waterLevel.trim(),
         upstreamWaterLevels: drawerDraft.upstreamWaterLevels,
         columnId: targetColumn,
@@ -2878,7 +3023,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         key: drawerDraft.key.trim(),
         title: drawerDraft.title.trim(),
         description: drawerDraft.description,
-        assignee: drawerDraft.assignee.trim(),
+        assignee: drawerDraft.assignee,
         waterLevel: drawerDraft.waterLevel.trim(),
         upstreamWaterLevels: drawerDraft.upstreamWaterLevels,
       }
@@ -2993,7 +3138,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                 React.createElement(
                   'span',
                   null,
-                  `Assignee: ${card.assignee || 'Unassigned'}`,
+                  `Assignee: ${assigneeLabel(card.assignee, agentPresets)}`,
                 ),
                 React.createElement('span', null, `WaterLevel: ${card.waterLevel}`),
                 React.createElement(
@@ -3062,7 +3207,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               {
                 type: 'button',
                 'aria-pressed': viewMode === 'board',
-                onClick: () => setViewMode('board'),
+                onClick: () => selectViewMode('board'),
               },
               'Board',
             ),
@@ -3071,7 +3216,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               {
                 type: 'button',
                 'aria-pressed': viewMode === 'flow',
-                onClick: () => setViewMode('flow'),
+                onClick: () => selectViewMode('flow'),
               },
               'Flow Canvas',
             ),
@@ -3157,6 +3302,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               onSaveWorkflowTemplate: (workflow) =>
                 openCaptureTemplate('workflow', workflow),
               onUpdateDependencies: updateDependencies,
+              agentPresets,
               busy,
             }),
           )
@@ -3168,6 +3314,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         columns: data.columns,
         projects: data.projects,
         workflows: data.workflows,
+        agentPresets,
         draft: drawerDraft,
         setDraft: setDrawerDraft,
         targetColumn,
@@ -3206,6 +3353,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         projects: data.projects,
         columns: data.columns,
         workflows: data.workflows,
+        agentPresets,
         draft: templateDraft,
         setDraft: setTemplateDraft,
         targetWorkflowId: templateTargetWorkflowId,

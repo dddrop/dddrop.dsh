@@ -4,7 +4,7 @@ Pavo is a Git-backed Work board and dependency canvas for the DeepSeek Harness W
 
 ## Behavior
 
-- Adds one `Pavo` conversation tab with `Flow Canvas` as the default view and the Kanban `Board` as a secondary view.
+- Adds one `Pavo` conversation tab with `Flow Canvas` as the initial default and the Kanban `Board` as a secondary view, then remembers the selected view across conversation-tab switches and page reloads.
 - Opens Flow Canvas at the fixed `Root Workflow`, supports nested Workflow containers, and uses breadcrumbs to navigate the hierarchy.
 - Allows users and Agents to create Works and Workflows. Every Work belongs to exactly one Workflow; every non-root Workflow belongs to exactly one parent Workflow.
 - Preserves the Kanban status columns, drag-and-drop movement rules, optimistic updates, polling, and Git synchronization behavior.
@@ -34,7 +34,10 @@ A normalized Work has this shape:
   "key": "PAVO-12",
   "title": "Release v1.0.0",
   "description": "Complete checks and release v1.0.0.",
-  "assignee": "Agent",
+  "assignee": {
+    "kind": "agent-preset",
+    "presetId": "standard"
+  },
   "waterLevel": "8",
   "upstreamWaterLevels": {
     "work-api": "12",
@@ -60,6 +63,22 @@ A normalized Workflow container has this shape:
 ```
 
 The fixed Root Workflow uses ID `root`, title `Root Workflow`, and `parentWorkflowId: null`. It cannot be renamed, moved, or deleted. Non-root Workflows may be nested and renamed or moved explicitly, but their parent graph must remain a rooted tree. An empty non-root Workflow may be deleted; Pavo rejects deletion while it contains direct Works or child Workflows. Workflow containers do not have Descriptions, status columns, WaterLevels, dependencies, execution state, or automatic aggregation.
+
+`assignee` is always one structured value:
+
+```json
+{ "kind": "unassigned" }
+```
+
+```json
+{ "kind": "human" }
+```
+
+```json
+{ "kind": "agent-preset", "presetId": "standard" }
+```
+
+The browser labels `human` as `Me` and reads the current Agent Preset roster from the optional Host `agentPresets` Service. A Preset assignment is only a stable reference: Pavo never creates or executes an Agent from it. If a referenced Preset is deleted or becomes unavailable, the Work retains its `presetId` and the UI marks it unavailable instead of clearing or reassigning it. Legacy non-empty freeform Assignee labels migrate to an unassigned value with a preserved `legacyLabel` so Pavo does not invent an Agent Preset identity.
 
 `upstreamWaterLevels` has two roles:
 
@@ -88,7 +107,7 @@ Templates remain passive data. Creating or instantiating one never executes an A
 
 When the Host provides the optional `tools` Service, Pavo registers seven global tools backed by the same `RepositoryController` as the browser API:
 
-- `pavo_list_works`: lists Works, Workflow containers, status columns, and the current board revision; it can filter exact Workflow membership.
+- `pavo_list_works`: lists Works, Workflow containers, status columns, sanitized Agent Preset choices, and the current board revision; it can filter exact Workflow membership or structured Assignee.
 - `pavo_read_work`: reads one Work, its Description, upstream context, and Root-to-Work Workflow path.
 - `pavo_update_work`: explicitly creates, edits, moves, or deletes one Work, including explicit Workflow assignment.
 - `pavo_update_workflow`: explicitly creates, renames, moves, or deletes one Workflow container.
@@ -110,16 +129,16 @@ Pavo intentionally keeps the default `dataDirectory` as `kanban` and the existin
     └── ...
 ```
 
-`board.json` storage version 6 contains Project names, columns, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 4 and contain `id`, `type`, `project`, `key`, `title`, `description`, `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps.
+`board.json` storage version 7 contains Project names, columns, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 5 and contain `id`, `type`, `project`, `key`, `title`, `description`, structured `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps.
 
 The reader remains compatible with:
 
 - Combined legacy `board.json` files with `cards` and `body`.
 - Split board versions 2 and 3 with `tickets` placements.
-- Split board versions 4 and 5 with `works` placements.
-- Ticket versions 1 through 3.
+- Split board versions 4 through 6 with `works` placements.
+- Ticket versions 1 through 4.
 
-Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, and data without Workflow membership is assigned to the synthesized Root Workflow. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `refactor(pavo): add template library` when write policy permits it.
+Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, and data without Workflow membership is assigned to the synthesized Root Workflow. Legacy Assignee strings become structured values without being treated as Agent Preset IDs. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `refactor(pavo): add structured assignees` when write policy permits it.
 
 The Host keeps `/_dddrop/kanban` and the browser snapshot's derived `cards` alias for already-loaded legacy clients. Canonical storage and current clients use Works.
 
@@ -129,7 +148,7 @@ The package has two faces mounted by one Cordis Loader row:
 
 - The Host registers fenced same-origin JSON endpoints through `ctx.webServer`. `GitBoardRepository` uses an in-process queue and a Git-directory lock to serialize synchronization, validation, atomic writes, commits, and pushes across Host processes.
 - `RepositoryController` owns the active repository, validates and atomically persists Settings changes, and restores a saved override on Host startup.
-- The Host optionally registers Agent tools through `ctx.get('tools')` without introducing a scheduler or background Agent.
+- The Host optionally registers Agent tools through `ctx.get('tools')` and reads sanitized Agent Preset metadata through `ctx.get('agentPresets')` without introducing a scheduler or background Agent.
 - The Client registers the `Pavo` tab in `conversation.view`, bundles `@xyflow/react` into its committed browser module, and registers the consolidated Pavo page in `settings.section`.
 
 The browser bundle is committed at `lib/client.js` because DSH loads prebuilt client bundles. Rebuild after changing `src/client.js`:

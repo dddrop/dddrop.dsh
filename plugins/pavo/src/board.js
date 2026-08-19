@@ -28,6 +28,11 @@ export const DEFAULT_WORKFLOW = Object.freeze([
 
 export const WORK_TYPES = Object.freeze(['goal', 'ongoing'])
 export const TEMPLATE_KINDS = Object.freeze(['work', 'workflow'])
+export const ASSIGNEE_KINDS = Object.freeze([
+  'unassigned',
+  'human',
+  'agent-preset',
+])
 export const ROOT_WORKFLOW_ID = 'root'
 export const ROOT_WORKFLOW_TITLE = 'Root Workflow'
 
@@ -63,6 +68,54 @@ function requireString(value, field, maximumLength, { allowEmpty = false } = {})
     throw new TypeError(`${field} must not exceed ${maximumLength} characters.`)
   }
   return normalized
+}
+
+export function normalizeAssignee(value) {
+  if (value === undefined || value === null) return { kind: 'unassigned' }
+  if (typeof value === 'string') {
+    const legacyLabel = requireString(
+      value,
+      'Work assignee',
+      MAX_ASSIGNEE_LENGTH,
+      { allowEmpty: true },
+    )
+    if (!legacyLabel) return { kind: 'unassigned' }
+    if (legacyLabel.toLocaleLowerCase('en-US') === 'me') {
+      return { kind: 'human' }
+    }
+    return { kind: 'unassigned', legacyLabel }
+  }
+
+  const assignee = requireObject(
+    value,
+    'Work assignee must be an object.',
+  )
+  if (!ASSIGNEE_KINDS.includes(assignee.kind)) {
+    throw new TypeError(
+      'Work assignee kind must be unassigned, human, or agent-preset.',
+    )
+  }
+  if (assignee.kind === 'agent-preset') {
+    return {
+      kind: 'agent-preset',
+      presetId: requireString(
+        assignee.presetId,
+        'Work assignee presetId',
+        MAX_ID_LENGTH,
+      ),
+    }
+  }
+  if (assignee.kind === 'unassigned' && assignee.legacyLabel !== undefined) {
+    return {
+      kind: 'unassigned',
+      legacyLabel: requireString(
+        assignee.legacyLabel,
+        'Work legacy assignee label',
+        MAX_ASSIGNEE_LENGTH,
+      ),
+    }
+  }
+  return { kind: assignee.kind }
 }
 
 export function normalizeWaterLevel(value, fallback) {
@@ -270,12 +323,7 @@ function normalizeEditableFields(
       MAX_DESCRIPTION_LENGTH,
       { allowEmpty: true },
     ),
-    assignee: requireString(
-      input?.assignee ?? '',
-      'Work assignee',
-      MAX_ASSIGNEE_LENGTH,
-      { allowEmpty: true },
-    ),
+    assignee: normalizeAssignee(input?.assignee),
     waterLevel: normalizeWaterLevel(input?.waterLevel, 0),
     upstreamWaterLevels: normalizeUpstreamWaterLevels(
       input?.upstreamWaterLevels,
@@ -602,7 +650,7 @@ export function createDefaultBoard({
         key: 'WELCOME',
         title: `Move this Work to ${columns[1]?.title ?? columns[0].title} to try the board.`,
         description: '',
-        assignee: '',
+        assignee: { kind: 'unassigned' },
         waterLevel: '0',
         upstreamWaterLevels: {},
         workflowId: ROOT_WORKFLOW_ID,

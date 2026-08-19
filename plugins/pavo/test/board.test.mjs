@@ -12,6 +12,7 @@ import {
   createDefaultBoard,
   instantiateTemplate,
   moveWork,
+  normalizeAssignee,
   normalizeBoard,
   normalizeWorkflow,
   removeProject,
@@ -250,6 +251,48 @@ test('allows Project and KEY to be empty on create and edit', () => {
   assert.equal(clearedWork.key, '')
 })
 
+test('normalizes human, Agent Preset, unassigned, and legacy Assignees', () => {
+  assert.deepEqual(normalizeAssignee(undefined), { kind: 'unassigned' })
+  assert.deepEqual(normalizeAssignee({ kind: 'unassigned' }), {
+    kind: 'unassigned',
+  })
+  assert.deepEqual(normalizeAssignee({ kind: 'human' }), { kind: 'human' })
+  assert.deepEqual(
+    normalizeAssignee({ kind: 'agent-preset', presetId: 'cordis' }),
+    { kind: 'agent-preset', presetId: 'cordis' },
+  )
+  assert.deepEqual(normalizeAssignee('Me'), { kind: 'human' })
+  assert.deepEqual(normalizeAssignee('Ada Lovelace'), {
+    kind: 'unassigned',
+    legacyLabel: 'Ada Lovelace',
+  })
+  assert.throws(
+    () => normalizeAssignee({ kind: 'agent-preset' }),
+    /presetId/,
+  )
+  assert.throws(() => normalizeAssignee({ kind: 'robot' }), /kind must be/)
+
+  const human = addWork(
+    createBoard(),
+    workInput({ id: 'human-work', assignee: { kind: 'human' } }),
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  assert.deepEqual(human.works[1].assignee, { kind: 'human' })
+  const preset = updateWork(
+    human,
+    {
+      ...human.works[1],
+      workId: 'human-work',
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+    },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  assert.deepEqual(preset.works[1].assignee, {
+    kind: 'agent-preset',
+    presetId: 'standard',
+  })
+})
+
 test('creates nested Workflows and assigns Works without changing dependency semantics', () => {
   const withRelease = addWorkflow(createBoard(), {
     id: 'release',
@@ -356,7 +399,10 @@ test('rejects invalid Workflow trees and protects the fixed Root Workflow', () =
 
 test('creates, edits, applies, and removes a Work template', () => {
   const board = createBoard()
-  const source = board.works[0]
+  const source = {
+    ...board.works[0],
+    assignee: { kind: 'agent-preset', presetId: 'standard' },
+  }
   const withTemplate = addTemplate(board, {
     id: 'template-work',
     kind: 'work',
@@ -369,6 +415,10 @@ test('creates, edits, applies, and removes a Work template', () => {
   assert.equal(withTemplate.templates[0].content.title, source.title)
   assert.equal(withTemplate.templates[0].content.workflowId, undefined)
   assert.equal(withTemplate.templates[0].content.upstreamWaterLevels, undefined)
+  assert.deepEqual(withTemplate.templates[0].content.assignee, {
+    kind: 'agent-preset',
+    presetId: 'standard',
+  })
 
   const renamed = updateTemplate(withTemplate, {
     templateId: 'template-work',
@@ -389,6 +439,10 @@ test('creates, edits, applies, and removes a Work template', () => {
   )
   assert.equal(created.title, source.title)
   assert.equal(created.workflowId, ROOT_WORKFLOW_ID)
+  assert.deepEqual(created.assignee, {
+    kind: 'agent-preset',
+    presetId: 'standard',
+  })
   assert.deepEqual(created.upstreamWaterLevels, {})
   assert.equal(removeTemplate(instantiated, { templateId: 'template-work' }).templates.length, 0)
 })

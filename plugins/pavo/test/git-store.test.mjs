@@ -402,7 +402,7 @@ test('reads legacy split storage with deterministic card defaults', async () => 
         key: '',
         description: '',
         upstreamWaterLevels: {},
-        assignee: '',
+        assignee: { kind: 'unassigned' },
         waterLevel: '0',
       },
     )
@@ -462,20 +462,20 @@ test('migrates a legacy combined board into split ticket files once', async () =
         'utf8',
       ),
     )
-    assert.equal(boardDocument.version, 6)
+    assert.equal(boardDocument.version, 7)
     assert.deepEqual(boardDocument.projects, [])
     assert.equal(boardDocument.cards, undefined)
     assert.equal(boardDocument.tickets, undefined)
     assert.deepEqual(boardDocument.works, [
       { id: legacyTicketId, columnId: 'backlog', order: 0 },
     ])
-    assert.equal(ticketDocument.version, 4)
+    assert.equal(ticketDocument.version, 5)
     assert.equal(ticketDocument.title, legacyBoard.cards[0].title)
     assert.equal(ticketDocument.key, '')
     assert.equal(ticketDocument.waterLevel, '0')
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'refactor(pavo): add template library',
+      'refactor(pavo): add structured assignees',
     )
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
 
@@ -517,10 +517,10 @@ test('migrates an empty version 4 board without a tracked tickets path', async (
     assert.equal(migrated.board.works.length, 0)
     assert.equal(migrated.board.workflows[0].id, ROOT_WORKFLOW_ID)
     const currentDocument = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(currentDocument.version, 6)
+    assert.equal(currentDocument.version, 7)
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'refactor(pavo): add template library',
+      'refactor(pavo): add structured assignees',
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -550,8 +550,50 @@ test('migrates version 5 Work placements into template storage', async () => {
     assert.equal(migrated.board.works.length, initial.board.works.length)
     assert.deepEqual(migrated.board.templates, [])
     const current = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(current.version, 6)
+    assert.equal(current.version, 7)
     assert.deepEqual(current.templates, [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('migrates legacy freeform Assignees without inventing Agent Presets', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-assignee-migration-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    const writer = new GitBoardRepository(config)
+    const initial = await writer.overview()
+    const workId = initial.board.works[0].id
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const ticketPath = path.join(root, 'kanban', 'tickets', `${workId}.json`)
+    const boardDocument = JSON.parse(await readFile(boardPath, 'utf8'))
+    const ticketDocument = JSON.parse(await readFile(ticketPath, 'utf8'))
+    boardDocument.version = 6
+    ticketDocument.version = 4
+    ticketDocument.assignee = 'Ada Lovelace'
+    await writeFile(boardPath, `${JSON.stringify(boardDocument, null, 2)}\n`)
+    await writeFile(ticketPath, `${JSON.stringify(ticketDocument, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json', 'kanban/tickets')
+    await git(root, 'commit', '-m', 'test: prepare legacy Assignee storage')
+
+    const migrated = await new GitBoardRepository(config).overview()
+    assert.deepEqual(migrated.board.works[0].assignee, {
+      kind: 'unassigned',
+      legacyLabel: 'Ada Lovelace',
+    })
+    const currentBoard = JSON.parse(await readFile(boardPath, 'utf8'))
+    const currentTicket = JSON.parse(await readFile(ticketPath, 'utf8'))
+    assert.equal(currentBoard.version, 7)
+    assert.equal(currentTicket.version, 5)
+    assert.deepEqual(currentTicket.assignee, {
+      kind: 'unassigned',
+      legacyLabel: 'Ada Lovelace',
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -586,7 +628,7 @@ test('persists the shared template library in board storage', async () => {
     const document = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(document.version, 6)
+    assert.equal(document.version, 7)
     assert.equal(document.templates[0].id, 'welcome-template')
     assert.equal(document.templates[0].content.workflowId, undefined)
   } finally {
@@ -638,9 +680,9 @@ test('persists nested Workflows and Work membership in current storage', async (
     const ticketDocument = JSON.parse(
       await readFile(path.join(root, 'kanban', 'tickets', 'release-work.json'), 'utf8'),
     )
-    assert.equal(boardDocument.version, 6)
+    assert.equal(boardDocument.version, 7)
     assert.equal(boardDocument.workflows[0].id, ROOT_WORKFLOW_ID)
-    assert.equal(ticketDocument.version, 4)
+    assert.equal(ticketDocument.version, 5)
     assert.equal(ticketDocument.workflowId, 'release')
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -719,7 +761,7 @@ test('persists cyclic Work dependencies and acknowledged WaterLevels', async () 
     const codeDocument = JSON.parse(
       await readFile(path.join(root, 'kanban', 'tickets', 'code.json'), 'utf8'),
     )
-    assert.equal(codeDocument.version, 4)
+    assert.equal(codeDocument.version, 5)
     assert.equal(codeDocument.description, '')
     assert.deepEqual(codeDocument.upstreamWaterLevels, { review: '5' })
   } finally {

@@ -7,6 +7,7 @@ import {
   compareWaterLevels,
   instantiateTemplate,
   moveWork,
+  normalizeAssignee,
   removeProject,
   removeTemplate,
   removeWork,
@@ -261,6 +262,18 @@ function publicSnapshot(snapshot, controller) {
   }
 }
 
+async function publicAgentPresets(agentPresets) {
+  if (!agentPresets) return []
+  const presets = await agentPresets.list()
+  return presets.map((preset) => ({
+    id: preset.id,
+    name: preset.name,
+    description: preset.description,
+    trust: preset.trust,
+    ...(preset.broken ? { broken: true } : {}),
+  }))
+}
+
 function mergedWorkInput(work, args) {
   return {
     ...work,
@@ -269,7 +282,8 @@ function mergedWorkInput(work, args) {
     key: args.key ?? work.key,
     title: args.title ?? work.title,
     description: args.description ?? args.body ?? work.description,
-    assignee: args.assignee ?? work.assignee,
+    assignee:
+      args.assignee === undefined ? work.assignee : args.assignee,
     waterLevel: args.waterLevel ?? work.waterLevel,
     upstreamWaterLevels:
       args.upstreamWaterLevels ?? work.upstreamWaterLevels,
@@ -315,7 +329,7 @@ function templateContentFromArgs(board, args, kind) {
   throw new TypeError('Template kind must be work or workflow.')
 }
 
-async function dispatch(controller, request) {
+async function dispatch(controller, request, agentPresets) {
   const body = await readJsonBody(request)
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new RequestError('The request body must be an object.')
@@ -331,6 +345,8 @@ async function dispatch(controller, request) {
       return controller.describe()
     case 'overview':
       return publicSnapshot(await controller.overview(), controller)
+    case 'agentPresets':
+      return { presets: await publicAgentPresets(agentPresets) }
     case 'saveRepository':
       assertRepositorySettingsRequest(request)
       return controller.updateRepository(
@@ -595,7 +611,7 @@ async function dispatch(controller, request) {
   }
 }
 
-function createHandler(controller, trustedHosts) {
+function createHandler(controller, trustedHosts, agentPresets) {
   return async (request, response) => {
     try {
       assertTrustedRequest(request, trustedHosts)
@@ -604,7 +620,7 @@ function createHandler(controller, trustedHosts) {
         sendJson(response, 405, { ok: false, error: 'Method not allowed.' })
         return
       }
-      const value = await dispatch(controller, request)
+      const value = await dispatch(controller, request, agentPresets)
       sendJson(response, 200, { ok: true, value })
     } catch (error) {
       const clientError =
@@ -650,6 +666,18 @@ function workView(work) {
     createdAt: work.createdAt,
     updatedAt: work.updatedAt,
   }
+}
+
+function assigneeText(assignee) {
+  if (assignee.kind === 'human') return 'me human'
+  if (assignee.kind === 'agent-preset') {
+    return `agent preset ${assignee.presetId}`
+  }
+  return `unassigned ${assignee.legacyLabel ?? ''}`.trim()
+}
+
+function sameAssignee(left, right) {
+  return JSON.stringify(left) === JSON.stringify(normalizeAssignee(right))
 }
 
 function workSummary(work) {
@@ -724,6 +752,32 @@ const WORKFLOW_COLUMN_SCHEMA = {
   },
 }
 
+const ASSIGNEE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    kind: {
+      type: 'string',
+      enum: ['unassigned', 'human', 'agent-preset'],
+      required: true,
+    },
+    presetId: { type: 'string' },
+    legacyLabel: { type: 'string' },
+  },
+}
+
+const AGENT_PRESET_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    name: { type: 'string' },
+    description: { type: 'string' },
+    trust: { type: 'string', enum: ['system', 'user'], required: true },
+    broken: { type: 'boolean' },
+  },
+}
+
 const WORK_SUMMARY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -733,7 +787,7 @@ const WORK_SUMMARY_SCHEMA = {
     project: { type: 'string', required: true },
     key: { type: 'string', required: true },
     title: { type: 'string', required: true },
-    assignee: { type: 'string', required: true },
+    assignee: { ...ASSIGNEE_SCHEMA, required: true },
     waterLevel: { type: 'string', required: true },
     workflowId: { type: 'string', required: true },
     columnId: { type: 'string', required: true },
@@ -764,7 +818,7 @@ const WORK_SCHEMA = {
     key: { type: 'string', required: true },
     title: { type: 'string', required: true },
     description: { type: 'string', required: true },
-    assignee: { type: 'string', required: true },
+    assignee: { ...ASSIGNEE_SCHEMA, required: true },
     waterLevel: { type: 'string', required: true },
     upstreamWaterLevels: { ...WATER_LEVEL_MAP_SCHEMA, required: true },
     workflowId: { type: 'string', required: true },
@@ -821,7 +875,11 @@ function registerAgentTools(ctx, controller) {
       project: { type: 'string', description: 'Filter by exact Project.' },
       columnId: { type: 'string', description: 'Filter by status column.' },
       workflowId: { type: 'string', description: 'Filter by exact Workflow container.' },
-      assignee: { type: 'string', description: 'Filter by exact assignee.' },
+      assignee: {
+        ...ASSIGNEE_SCHEMA,
+        description:
+          'Filter by exact structured assignee: unassigned, human, or agent-preset.',
+      },
       query: {
         type: 'string',
         description: 'Case-insensitive text matched across Work content.',
@@ -850,25 +908,36 @@ function registerAgentTools(ctx, controller) {
             required: true,
             items: WORKFLOW_SCHEMA,
           },
+          agentPresets: {
+            type: 'array',
+            required: true,
+            items: AGENT_PRESET_SCHEMA,
+          },
         },
       },
       render: (_args, value) => renderToolValue('Pavo Work list', value),
     },
     async execute(args) {
-      const snapshot = await controller.overview()
+      const [snapshot, agentPresetList] = await Promise.all([
+        controller.overview(),
+        publicAgentPresets(ctx.get('agentPresets')),
+      ])
       const query = args.query?.toLocaleLowerCase('en-US')
       const works = snapshot.board.works.filter((work) => {
         if (args.project !== undefined && work.project !== args.project) return false
         if (args.columnId !== undefined && work.columnId !== args.columnId) return false
         if (args.workflowId !== undefined && work.workflowId !== args.workflowId) return false
-        if (args.assignee !== undefined && work.assignee !== args.assignee) return false
+        if (
+          args.assignee !== undefined &&
+          !sameAssignee(work.assignee, args.assignee)
+        ) return false
         if (!query) return true
         return [
           work.key,
           work.title,
           work.description,
           work.project,
-          work.assignee,
+          assigneeText(work.assignee),
         ].some((value) => value.toLocaleLowerCase('en-US').includes(query))
       })
       return {
@@ -882,6 +951,7 @@ function registerAgentTools(ctx, controller) {
           allowedTransitions: [...column.allowedTransitions],
         })),
         workflows: snapshot.board.workflows.map((container) => ({ ...container })),
+        agentPresets: agentPresetList,
       }
     },
     presentCall: () => ({ card: 'generic', title: 'List Pavo Works', kind: 'read' }),
@@ -946,7 +1016,7 @@ function registerAgentTools(ctx, controller) {
       key: { type: 'string' },
       title: { type: 'string' },
       description: { type: 'string' },
-      assignee: { type: 'string' },
+      assignee: ASSIGNEE_SCHEMA,
       waterLevel: { type: 'string' },
       upstreamWaterLevels: WATER_LEVEL_MAP_SCHEMA,
       workflowId: { type: 'string' },
@@ -1031,7 +1101,7 @@ function registerAgentTools(ctx, controller) {
                   key: args.key,
                   title: args.title,
                   description: args.description ?? '',
-                  assignee: args.assignee ?? '',
+                  assignee: args.assignee ?? { kind: 'unassigned' },
                   waterLevel: args.waterLevel ?? '0',
                   upstreamWaterLevels: args.upstreamWaterLevels ?? {},
                   workflowId: args.workflowId ?? ROOT_WORKFLOW_ID,
@@ -1502,7 +1572,8 @@ function registerAgentTools(ctx, controller) {
 export async function apply(ctx, config) {
   const controller = await RepositoryController.create(config)
   const trustedHosts = ctx.get('webRuntime')?.trustedHosts ?? []
-  const handler = createHandler(controller, trustedHosts)
+  const agentPresets = ctx.get('agentPresets')
+  const handler = createHandler(controller, trustedHosts, agentPresets)
 
   for (const path of [API_PATH, LEGACY_API_PATH]) {
     ctx.effect(() =>

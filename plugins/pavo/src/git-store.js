@@ -302,10 +302,10 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 6
-const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5])
-const TICKET_FORMAT_VERSION = 4
-const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3])
+const BOARD_FORMAT_VERSION = 7
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6])
+const TICKET_FORMAT_VERSION = 5
+const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4])
 const MAX_TICKET_ID_LENGTH = 128
 const SAFE_TICKET_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
 
@@ -764,7 +764,7 @@ export class GitBoardRepository {
         ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
           document.version,
         ) ||
-        ([4, 5, BOARD_FORMAT_VERSION].includes(document.version)
+        ([4, 5, 6, BOARD_FORMAT_VERSION].includes(document.version)
           ? !Array.isArray(document.works)
           : !Array.isArray(document.tickets))
       ) {
@@ -774,7 +774,7 @@ export class GitBoardRepository {
       }
 
       const projects = document.projects ?? []
-      const placements = ([4, 5, BOARD_FORMAT_VERSION].includes(document.version)
+      const placements = ([4, 5, 6, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
         .map((value, index) => {
@@ -1186,7 +1186,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'refactor(pavo): add template library',
+      'refactor(pavo): add structured assignees',
       snapshot.board,
     )
     this.cachedSnapshot = migrated
