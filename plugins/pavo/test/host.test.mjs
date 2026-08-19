@@ -268,7 +268,8 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.version, 9)
+    assert.equal(board.version, 10)
+    assert.deepEqual(board.columns[0].allowedTransitions, ['ready'])
     assert.equal(board.projects, undefined)
     assert.equal(board.cards, undefined)
     assert.equal(board.tickets, undefined)

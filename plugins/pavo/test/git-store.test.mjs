@@ -15,6 +15,7 @@ import test from 'node:test'
 import { promisify } from 'node:util'
 
 import {
+  DEFAULT_WORKFLOW,
   ROOT_WORKFLOW_ID,
   addTemplate,
   addWork,
@@ -464,7 +465,7 @@ test('migrates a legacy combined board into split ticket files once', async () =
         'utf8',
       ),
     )
-    assert.equal(boardDocument.version, 9)
+    assert.equal(boardDocument.version, 10)
     assert.equal(boardDocument.projects, undefined)
     assert.equal(boardDocument.cards, undefined)
     assert.equal(boardDocument.tickets, undefined)
@@ -481,7 +482,7 @@ test('migrates a legacy combined board into split ticket files once', async () =
     assert.equal(ticketDocument.waterLevel, '0')
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'feat(pavo): add Agent execution references',
+      'feat(pavo): persist column transition rules',
     )
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
 
@@ -523,10 +524,10 @@ test('migrates an empty version 4 board without a tracked tickets path', async (
     assert.equal(migrated.board.works.length, 0)
     assert.equal(migrated.board.workflows[0].id, ROOT_WORKFLOW_ID)
     const currentDocument = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(currentDocument.version, 9)
+    assert.equal(currentDocument.version, 10)
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'feat(pavo): add Agent execution references',
+      'feat(pavo): persist column transition rules',
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -556,7 +557,7 @@ test('migrates version 5 Work placements into template storage', async () => {
     assert.equal(migrated.board.works.length, initial.board.works.length)
     assert.deepEqual(migrated.board.templates, [])
     const current = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(current.version, 9)
+    assert.equal(current.version, 10)
     assert.deepEqual(current.templates, [])
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -610,7 +611,7 @@ test('migrates legacy Project and Assignee labels without inventing identities',
     })
     const currentBoard = JSON.parse(await readFile(boardPath, 'utf8'))
     const currentTicket = JSON.parse(await readFile(ticketPath, 'utf8'))
-    assert.equal(currentBoard.version, 9)
+    assert.equal(currentBoard.version, 10)
     assert.equal(currentBoard.projects, undefined)
     assert.equal(currentTicket.version, 7)
     assert.equal(currentTicket.project, undefined)
@@ -654,12 +655,52 @@ test('migrates Workspace storage to Agent Session references', async () => {
     assert.equal(migrated.board.works[0].sessionId, '')
     const currentBoard = JSON.parse(await readFile(boardPath, 'utf8'))
     const currentTicket = JSON.parse(await readFile(ticketPath, 'utf8'))
-    assert.equal(currentBoard.version, 9)
+    assert.equal(currentBoard.version, 10)
     assert.equal(currentTicket.version, 7)
     assert.equal(currentTicket.sessionId, '')
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'feat(pavo): add Agent execution references',
+      'feat(pavo): persist column transition rules',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('migrates profile transition rules into board storage', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-transition-migration-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    const writer = new GitBoardRepository(config)
+    await writer.overview()
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const legacy = JSON.parse(await readFile(boardPath, 'utf8'))
+    legacy.version = 9
+    legacy.columns = legacy.columns.map(({ allowedTransitions, ...column }) => column)
+    await writeFile(boardPath, `${JSON.stringify(legacy, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json')
+    await git(root, 'commit', '-m', 'test: prepare board without transition rules')
+
+    const migrated = await new GitBoardRepository(config).overview()
+    assert.deepEqual(
+      migrated.board.columns.map(({ id, title, allowedTransitions }) => ({
+        id,
+        title,
+        allowedTransitions,
+      })),
+      DEFAULT_WORKFLOW,
+    )
+    const current = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(current.version, 10)
+    assert.deepEqual(current.columns[0].allowedTransitions, ['ready'])
+    assert.equal(
+      await git(root, 'log', '-1', '--format=%s'),
+      'feat(pavo): persist column transition rules',
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -695,6 +736,16 @@ test('rejects legacy Project fields in current Workspace storage', async () => {
     )
 
     delete boardDocument.projects
+    delete boardDocument.columns[0].allowedTransitions
+    await writeFile(boardPath, `${JSON.stringify(boardDocument, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json')
+    await git(root, 'commit', '-m', 'test: remove current transition rules')
+    await assert.rejects(
+      new GitBoardRepository(config).overview(),
+      /define column allowedTransitions/,
+    )
+
+    boardDocument.columns[0].allowedTransitions = ['ready']
     await writeFile(boardPath, `${JSON.stringify(boardDocument, null, 2)}\n`)
     const ticketDocument = JSON.parse(await readFile(ticketPath, 'utf8'))
     ticketDocument.project = 'Legacy Project'
@@ -739,7 +790,7 @@ test('persists the shared template library in board storage', async () => {
     const document = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(document.version, 9)
+    assert.equal(document.version, 10)
     assert.equal(document.templates[0].id, 'welcome-template')
     assert.equal(document.templates[0].content.workflowId, undefined)
   } finally {
@@ -784,7 +835,7 @@ test('persists the Session linked by an Agent Work run', async () => {
         'utf8',
       ),
     )
-    assert.equal(boardDocument.version, 9)
+    assert.equal(boardDocument.version, 10)
     assert.equal(ticketDocument.version, 7)
     assert.equal(ticketDocument.sessionId, 'session-persisted-run')
     const reloaded = await new GitBoardRepository({
@@ -843,7 +894,7 @@ test('persists nested Workflows and Work membership in current storage', async (
     const ticketDocument = JSON.parse(
       await readFile(path.join(root, 'kanban', 'tickets', 'release-work.json'), 'utf8'),
     )
-    assert.equal(boardDocument.version, 9)
+    assert.equal(boardDocument.version, 10)
     assert.equal(boardDocument.workflows[0].id, ROOT_WORKFLOW_ID)
     assert.equal(ticketDocument.version, 7)
     assert.equal(ticketDocument.workflowId, 'release')

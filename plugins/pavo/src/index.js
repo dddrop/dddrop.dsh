@@ -266,7 +266,13 @@ function publicSnapshot(snapshot, controller) {
     revision: snapshot.revision,
     pollIntervalMs:
       snapshot.pollIntervalMs ?? controller.config.pollIntervalMs,
-    workflow: snapshot.workflow ?? controller.config.columns,
+    workflow:
+      snapshot.workflow ??
+      snapshot.board.columns.map((column) => ({
+        id: column.id,
+        title: column.title,
+        allowedTransitions: [...column.allowedTransitions],
+      })),
     syncError:
       typeof snapshot.syncError === 'string' ? snapshot.syncError : undefined,
     ...controller.describe(),

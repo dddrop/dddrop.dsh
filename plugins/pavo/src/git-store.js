@@ -302,8 +302,8 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 9
-const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7, 8])
+const BOARD_FORMAT_VERSION = 10
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7, 8, 9])
 const TICKET_FORMAT_VERSION = 7
 const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6])
 const MAX_TICKET_ID_LENGTH = 128
@@ -785,7 +785,7 @@ export class GitBoardRepository {
         ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
           document.version,
         ) ||
-        ([4, 5, 6, 7, 8, BOARD_FORMAT_VERSION].includes(document.version)
+        ([4, 5, 6, 7, 8, 9, BOARD_FORMAT_VERSION].includes(document.version)
           ? !Array.isArray(document.works)
           : !Array.isArray(document.tickets))
       ) {
@@ -797,13 +797,17 @@ export class GitBoardRepository {
       if (
         document.version === BOARD_FORMAT_VERSION &&
         (Object.hasOwn(document, 'projects') ||
-          document.templates?.some(templateUsesLegacyProject))
+          document.templates?.some(templateUsesLegacyProject) ||
+          !Array.isArray(document.columns) ||
+          document.columns.some(
+            (column) => !Array.isArray(column?.allowedTransitions),
+          ))
       ) {
         throw new TypeError(
-          'Current board storage must use DSH Workspace references instead of Project fields.',
+          'Current board storage must use DSH Workspace references and define column allowedTransitions.',
         )
       }
-      const placements = ([4, 5, 6, 7, 8, BOARD_FORMAT_VERSION].includes(document.version)
+      const placements = ([4, 5, 6, 7, 8, 9, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
         .map((value, index) => {
@@ -1233,7 +1237,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'feat(pavo): add Agent execution references',
+      'feat(pavo): persist column transition rules',
       snapshot.board,
     )
     this.cachedSnapshot = migrated
@@ -1265,7 +1269,11 @@ export class GitBoardRepository {
     return {
       ...snapshot,
       pollIntervalMs: this.config.pollIntervalMs,
-      workflow: this.config.columns,
+      workflow: snapshot.board.columns.map((column) => ({
+        id: column.id,
+        title: column.title,
+        allowedTransitions: [...column.allowedTransitions],
+      })),
       syncError: this.lastSyncError,
     }
   }

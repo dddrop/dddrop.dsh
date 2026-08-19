@@ -1,6 +1,6 @@
 {
   "name": "@dddrop/dsh-plugin-pavo",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "description": "A Git-backed DSH Workspace-aware Work board with explicit Agent Session execution, nested Workflow canvas, and reusable Template Library for the DeepSeek Harness Web interface.",

@@ -693,6 +693,24 @@ test('enforces workflow transitions and Work field validation', () => {
     () => moveWork(board, { workId: 'new-work', columnId: 'in-progress' }),
     /cannot move/,
   )
+  const unrestricted = {
+    ...board,
+    columns: board.columns.map((column) => ({
+      ...column,
+      allowedTransitions: board.columns
+        .filter((candidate) => candidate.id !== column.id)
+        .map((candidate) => candidate.id),
+    })),
+  }
+  const moved = moveWork(
+    unrestricted,
+    { workId: 'new-work', columnId: 'done' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  assert.equal(
+    moved.works.find((work) => work.id === 'new-work').columnId,
+    'done',
+  )
   assert.throws(
     () => addWork(createBoard(), workInput({ type: 'task' })),
     /goal or ongoing/,

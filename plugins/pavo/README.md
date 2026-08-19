@@ -144,16 +144,16 @@ Pavo intentionally keeps the default `dataDirectory` as `kanban` and the existin
     └── ...
 ```
 
-`board.json` storage version 9 contains columns, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 7 and contain `id`, `type`, `workspaceId`, `sessionId`, optional migration-only `legacyWorkspaceTitle`, `key`, `title`, `description`, structured `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps. DSH Workspace titles are live registry metadata and are not duplicated into canonical Pavo storage. Templates never capture Session IDs.
+`board.json` storage version 10 contains columns with their `allowedTransitions`, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 7 and contain `id`, `type`, `workspaceId`, `sessionId`, optional migration-only `legacyWorkspaceTitle`, `key`, `title`, `description`, structured `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps. DSH Workspace titles are live registry metadata and are not duplicated into canonical Pavo storage. Templates never capture Session IDs.
 
 The reader remains compatible with:
 
 - Combined legacy `board.json` files with `cards` and `body`.
 - Split board versions 2 and 3 with `tickets` placements.
-- Split board versions 4 through 8 with `works` placements.
+- Split board versions 4 through 9 with `works` placements.
 - Ticket versions 1 through 6.
 
-Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, missing `sessionId` becomes an empty string, and data without Workflow membership is assigned to the synthesized Root Workflow. Legacy Assignee strings become structured values without being treated as Agent Preset IDs. Non-empty legacy Project names become `legacyWorkspaceTitle` with an empty `workspaceId`; migration deliberately does not guess a DSH Workspace ID from a mutable title. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `feat(pavo): add Agent execution references` when write policy permits it.
+Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, missing `sessionId` becomes an empty string, and data without Workflow membership is assigned to the synthesized Root Workflow. Boards that do not store transition rules receive the profile's bootstrap rules once during migration. Legacy Assignee strings become structured values without being treated as Agent Preset IDs. Non-empty legacy Project names become `legacyWorkspaceTitle` with an empty `workspaceId`; migration deliberately does not guess a DSH Workspace ID from a mutable title. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `feat(pavo): persist column transition rules` when write policy permits it.
 
 The Host keeps `/_dddrop/kanban` and the browser snapshot's derived `cards` alias for already-loaded legacy clients. Canonical storage and current clients use Works.
 
@@ -214,9 +214,20 @@ Configure bootstrap and recovery defaults in the Web profile Cordis patch:
 
 `repositoryPath` remains a required bootstrap value. `settingsPath` defaults to `$DSH_HOME/pavo/repository.json` or `~/.dsh/pavo/repository.json`. The profile reads `PAVO_REPOSITORY_PATH`, falls back to deprecated `KANBAN_REPOSITORY_PATH`, and then uses `~/Development/dddrop.dsh.data`.
 
+Profile `columns` are bootstrap and legacy-migration defaults only. Current boards persist each column's movement rules directly in `<repositoryPath>/<dataDirectory>/board.json`. For example, a Backlog column that may move to every other default column is stored as:
+
+```json
+{
+  "id": "backlog",
+  "title": "Backlog",
+  "allowedTransitions": ["ready", "in-progress", "review", "done"],
+  "order": 0
+}
+```
+
 Open Settings → Pavo to change the repository path, managed data directory, branch, remote, synchronization flags, and polling intervals. The page also shows the sanitized DSH Workspace roster as read-only metadata; manage those Workspaces from the DSH sidebar. Pavo validates a candidate checkout before persisting it or replacing the active repository. If a saved override is unreadable, Pavo keeps profile defaults available for recovery and reports a warning.
 
-Column IDs are stable persisted identifiers. Renaming a title is safe. Removing or changing an ID requires migrating every Work placement first.
+Column IDs are stable persisted identifiers. Renaming a title or changing `allowedTransitions` is safe. Removing or changing an ID requires migrating every Work placement and transition reference first.
 
 ## Works, Workflows, and DSH Workspaces
 

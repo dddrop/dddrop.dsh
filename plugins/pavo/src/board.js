@@ -163,6 +163,7 @@ function cloneColumn(column, order) {
   return {
     id: column.id,
     title: column.title,
+    allowedTransitions: [...column.allowedTransitions],
     order,
   }
 }
@@ -660,8 +661,14 @@ export function createDefaultBoard({
 
 export function normalizeBoard(input, { workflow } = {}) {
   const board = requireObject(input, 'The board must be an object.')
-  const configuredWorkflow = workflow ? normalizeWorkflow(workflow) : undefined
-  const columnInput = configuredWorkflow ?? board.columns
+  const boardDefinesTransitions =
+    Array.isArray(board.columns) &&
+    board.columns.every((column) => Array.isArray(column?.allowedTransitions))
+  const configuredWorkflow =
+    workflow && !boardDefinesTransitions ? normalizeWorkflow(workflow) : undefined
+  const columnInput = boardDefinesTransitions
+    ? board.columns
+    : configuredWorkflow ?? board.columns
   const fallbackTimestamp = board.works?.[0]?.createdAt ?? board.cards?.[0]?.createdAt
   const workflows = normalizeWorkflows(board.workflows, fallbackTimestamp)
   const workflowIds = new Set(workflows.map((container) => container.id))
@@ -686,29 +693,17 @@ export function normalizeBoard(input, { workflow } = {}) {
     throw new TypeError(`The board must not exceed ${MAX_WORKS} Works.`)
   }
 
-  const columnIds = new Set()
-  const columns = columnInput.map((value, index) => {
-    const column = requireObject(value, `Column ${index} must be an object.`)
-    const id = requireString(column.id, `Column ${index} id`, MAX_ID_LENGTH)
-    const title = requireString(
-      column.title,
-      `Column ${index} title`,
-      MAX_TITLE_LENGTH,
-    )
-
-    if (columnIds.has(id)) throw new TypeError(`Duplicate column id: ${id}`)
-    columnIds.add(id)
-
-    return {
-      id,
-      title,
-      order: configuredWorkflow
+  const columns = normalizeWorkflow(columnInput).map((column, index) =>
+    cloneColumn(
+      column,
+      configuredWorkflow
         ? index
-        : Number.isFinite(column.order)
-          ? column.order
+        : Number.isFinite(columnInput[index].order)
+          ? columnInput[index].order
           : index,
-    }
-  })
+    ),
+  )
+  const columnIds = new Set(columns.map((column) => column.id))
 
   const workIds = new Set()
   const indexedWorks = workInput.map((value, index) => {
@@ -1198,7 +1193,7 @@ export function removeWorkflow(boardInput, input, { workflow } = {}) {
 
 export function moveWork(boardInput, input, { workflow } = {}) {
   const board = normalizeBoard(boardInput, { workflow })
-  const rules = normalizeWorkflow(workflow ?? DEFAULT_WORKFLOW)
+  const rules = normalizeWorkflow(board.columns)
   const workId = requireString(
     input?.workId ?? input?.cardId,
     'Work id',
