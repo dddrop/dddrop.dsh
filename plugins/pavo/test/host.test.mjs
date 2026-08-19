@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import {
   access,
   mkdtemp,
@@ -69,8 +70,18 @@ function createContext(
   registerRoute,
   registerTool,
   agentPresets,
-  workspaceRegistry = { list: () => [] },
+  workspaceRegistry = { list: () => [], get: () => undefined },
+  runServices = {},
 ) {
+  const resolvedAgentPresets = agentPresets ?? {
+    async list() {
+      return []
+    },
+    async resolve(id) {
+      throw new Error(`Unknown Agent Preset: ${id}`)
+    },
+    async mount() {},
+  }
   const tools = registerTool
     ? {
         register(tool) {
@@ -81,10 +92,20 @@ function createContext(
     : undefined
   return {
     workspaceRegistry,
+    agents: runServices.agents ?? {
+      async create() {
+        throw new Error('Agent creation was not expected in this test.')
+      },
+    },
+    agentPresets: resolvedAgentPresets,
+    agentDefaultModel: runServices.agentDefaultModel ?? {
+      currentSelection: () => ({ provider: 'test', model: 'test-model' }),
+    },
+    sessionTitle: runServices.sessionTitle ?? { rename() {} },
     get(service) {
       if (service === 'webRuntime') return { trustedHosts: [] }
       if (service === 'tools') return tools
-      if (service === 'agentPresets') return agentPresets
+      if (service === 'agentPresets') return resolvedAgentPresets
       return undefined
     },
     webServer: {
@@ -247,7 +268,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.version, 8)
+    assert.equal(board.version, 9)
     assert.equal(board.projects, undefined)
     assert.equal(board.cards, undefined)
     assert.equal(board.tickets, undefined)
@@ -263,9 +284,10 @@ test('serves one global Git-backed board and commits every mutation', async () =
         'utf8',
       ),
     )
-    assert.equal(welcomeTicket.version, 6)
+    assert.equal(welcomeTicket.version, 7)
     assert.equal(welcomeTicket.id, board.works[0].id)
     assert.equal(welcomeTicket.type, 'goal')
+    assert.equal(welcomeTicket.sessionId, '')
     assert.equal(welcomeTicket.description, '')
     assert.deepEqual(welcomeTicket.upstreamWaterLevels, {})
     assert.equal(welcomeTicket.key, 'WELCOME')
@@ -539,6 +561,367 @@ test('serves sanitized DSH Workspaces without paths or session IDs', async () =>
     const payload = JSON.stringify(response.payload.value)
     assert.equal(payload.includes('/private/'), false)
     assert.equal(payload.includes('private-session'), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('runs a Ready Agent-assigned Work in its DSH Workspace', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-run-work-'))
+  const routes = []
+  const lifecycle = []
+  let createCount = 0
+  let resumeCount = 0
+  let createdOptions
+  let resumedOptions
+  let promptedMessage
+  const liveAgents = new Map()
+  let linkedSessionId = ''
+  let rejectTitle = true
+  const workspace = {
+    id: 'workspace-run',
+    title: 'Run Workspace',
+    path: root,
+    sessionIds: [],
+    async status() {
+      return 'ok'
+    },
+    async attachSession(sessionId) {
+      lifecycle.push(`attach:${sessionId}`)
+      linkedSessionId = sessionId
+    },
+    async detachSession(sessionId) {
+      lifecycle.push(`detach:${sessionId}`)
+    },
+  }
+  const workspaceRegistry = {
+    list: () => [workspace],
+    get: (id) => (id === workspace.id ? workspace : undefined),
+    async archiveSession(sessionId) {
+      lifecycle.push(`archive:${sessionId}`)
+    },
+  }
+  const agentPresets = {
+    async list() {
+      return [
+        {
+          id: 'standard',
+          name: 'Standard',
+          description: 'Test preset',
+          trust: 'user',
+        },
+      ]
+    },
+    async resolve(id) {
+      assert.equal(id, 'standard')
+      return { id: 'standard', name: 'Standard' }
+    },
+    async mount(agentCtx, id) {
+      lifecycle.push(`mount:${id}`)
+      assert.equal(agentCtx.agent.session.header.agentPreset, id)
+    },
+  }
+  const agents = {
+    async create(options) {
+      createCount += 1
+      createdOptions = options
+      const session = {
+        id: options.sessionId,
+        events: [],
+        header: {
+          cwd: options.meta.cwd,
+          agentPreset: options.meta.agentPreset,
+        },
+      }
+      const agent = {
+        id: options.sessionId,
+        session,
+        async whenIdle() {
+          lifecycle.push('idle')
+        },
+        followup(message) {
+          const ticket = JSON.parse(
+            readFileSync(
+              path.join(
+                root,
+                'kanban',
+                'tickets',
+                `${configuredWorkId}.json`,
+              ),
+              'utf8',
+            ),
+          )
+          assert.equal(ticket.sessionId, options.sessionId)
+          lifecycle.push('followup')
+          promptedMessage = message
+        },
+      }
+      const eventNames = []
+      await options.setup({
+        agent,
+        on(name) {
+          eventNames.push(name)
+          return () => {}
+        },
+      })
+      lifecycle.push(`events:${eventNames.sort().join(',')}`)
+      liveAgents.set(agent.id, agent)
+      return {
+        agent,
+        async dispose() {
+          lifecycle.push(`dispose:${options.sessionId}`)
+          liveAgents.delete(agent.id)
+        },
+      }
+    },
+    get(sessionId) {
+      return liveAgents.get(sessionId)
+    },
+    async resume(options) {
+      resumeCount += 1
+      resumedOptions = options
+      const session = {
+        id: options.resumeSessionId,
+        events: [],
+        header: { cwd: root, agentPreset: 'standard' },
+      }
+      const agent = {
+        id: options.resumeSessionId,
+        session,
+        async whenIdle() {
+          lifecycle.push('idle')
+        },
+        followup(message) {
+          const ticket = JSON.parse(
+            readFileSync(
+              path.join(
+                root,
+                'kanban',
+                'tickets',
+                `${configuredWorkId}.json`,
+              ),
+              'utf8',
+            ),
+          )
+          assert.equal(ticket.sessionId, options.resumeSessionId)
+          lifecycle.push('followup')
+          promptedMessage = message
+        },
+      }
+      const eventNames = []
+      await options.setup({
+        agent,
+        on(name) {
+          eventNames.push(name)
+          return () => {}
+        },
+      })
+      lifecycle.push(`resume-events:${eventNames.sort().join(',')}`)
+      liveAgents.set(agent.id, agent)
+      return {
+        agent,
+        async dispose() {
+          lifecycle.push(`resume-dispose:${options.resumeSessionId}`)
+          liveAgents.delete(agent.id)
+        },
+      }
+    },
+  }
+  let configuredWorkId = ''
+  try {
+    await apply(
+      createContext(
+        (registered) => routes.push(registered),
+        undefined,
+        agentPresets,
+        workspaceRegistry,
+        {
+          agents,
+          agentDefaultModel: {
+            currentSelection: () => ({
+              provider: 'test-provider',
+              model: 'test-model',
+              reasoningEffort: 'high',
+            }),
+          },
+          sessionTitle: {
+            rename(session, title) {
+              lifecycle.push(`title:${title}`)
+              assert.equal(session.id, linkedSessionId)
+              if (rejectTitle) throw new Error('test title failure')
+            },
+          },
+        },
+      ),
+      {
+        repositoryPath: root,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath: path.join(root, '.pavo-settings.json'),
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const initial = await call(route, 'overview')
+    configuredWorkId = initial.payload.value.board.works[0].id
+    const configured = await call(route, 'updateWork', {
+      workId: configuredWorkId,
+      workspaceId: workspace.id,
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+      description: 'Execute this exact Pavo Work prompt.',
+      expectedRevision: initial.payload.value.revision,
+    })
+    const ready = await call(route, 'moveWork', {
+      workId: configuredWorkId,
+      columnId: 'ready',
+      expectedRevision: configured.payload.value.revision,
+    })
+    const failed = await call(route, 'runWork', {
+      workId: configuredWorkId,
+      expectedRevision: ready.payload.value.revision,
+    })
+    assert.equal(failed.response.status, 500)
+    assert.equal(createCount, 1)
+    assert.equal(lifecycle.some((entry) => entry.startsWith('detach:')), true)
+    assert.equal(lifecycle.some((entry) => entry.startsWith('dispose:')), true)
+    assert.equal(lifecycle.some((entry) => entry.startsWith('archive:')), true)
+    const afterFailure = await call(route, 'overview')
+    const unclaimed = afterFailure.payload.value.board.works.find(
+      (work) => work.id === configuredWorkId,
+    )
+    assert.equal(unclaimed.columnId, 'ready')
+    assert.equal(unclaimed.sessionId, '')
+    assert.equal(promptedMessage, undefined)
+    rejectTitle = false
+
+    const [started, concurrent, staleConcurrent] = await Promise.all([
+      call(route, 'runWork', {
+        workId: configuredWorkId,
+        expectedRevision: ready.payload.value.revision,
+      }),
+      call(route, 'runWork', {
+        workId: configuredWorkId,
+        expectedRevision: ready.payload.value.revision,
+      }),
+      call(route, 'runWork', {
+        workId: configuredWorkId,
+        expectedRevision: 'stale-concurrent-revision',
+      }),
+    ])
+    assert.equal(started.response.status, 200, started.response.body)
+    assert.equal(concurrent.response.status, 200, concurrent.response.body)
+    assert.equal(staleConcurrent.response.status, 409)
+    assert.match(staleConcurrent.payload.error, /changed since it was loaded/)
+    assert.equal(
+      concurrent.payload.value.run.sessionId,
+      started.payload.value.run.sessionId,
+    )
+    assert.equal(createCount, 2)
+    const runningWork = started.payload.value.board.works.find(
+      (work) => work.id === configuredWorkId,
+    )
+    assert.equal(runningWork.columnId, 'in-progress')
+    assert.equal(runningWork.sessionId, started.payload.value.run.sessionId)
+    assert.equal(started.payload.value.run.workspaceId, workspace.id)
+    assert.equal(started.payload.value.run.agentPresetId, 'standard')
+    assert.equal(started.payload.value.run.mode, 'created')
+    assert.equal(createdOptions.sessionId, runningWork.sessionId)
+    assert.deepEqual(createdOptions.meta, {
+      cwd: root,
+      agentPreset: 'standard',
+    })
+    assert.deepEqual(createdOptions.agentOptions, {
+      provider: 'test-provider',
+      model: 'test-model',
+      reasoningEffort: 'high',
+    })
+    assert.equal(lifecycle.includes(`attach:${runningWork.sessionId}`), true)
+    assert.equal(lifecycle.includes('mount:standard'), true)
+    assert.equal(lifecycle.includes('events:agent/request,system-prompt/assemble'), true)
+    assert.equal(lifecycle.includes('title:Move this Work to Ready to try the board.'), true)
+    assert.deepEqual(promptedMessage.role, 'user')
+    assert.deepEqual(promptedMessage.source, { kind: 'user' })
+    assert.deepEqual(promptedMessage.content, [
+      { type: 'text', text: 'Execute this exact Pavo Work prompt.' },
+    ])
+    assert.match(
+      promptedMessage.id,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    )
+    const repeated = await call(route, 'runWork', {
+      workId: configuredWorkId,
+      expectedRevision: started.payload.value.revision,
+    })
+    assert.equal(repeated.response.status, 400)
+    assert.match(repeated.payload.error, /must be Ready/)
+
+    const goalReadyAgain = await call(route, 'moveWork', {
+      workId: configuredWorkId,
+      columnId: 'ready',
+      expectedRevision: started.payload.value.revision,
+    })
+    const goalRerun = await call(route, 'runWork', {
+      workId: configuredWorkId,
+      expectedRevision: goalReadyAgain.payload.value.revision,
+    })
+    assert.equal(goalRerun.response.status, 200, goalRerun.response.body)
+    assert.equal(goalRerun.payload.value.run.mode, 'created')
+    assert.notEqual(
+      goalRerun.payload.value.run.sessionId,
+      started.payload.value.run.sessionId,
+    )
+    assert.equal(createCount, 3)
+
+    const ongoing = await call(route, 'updateWork', {
+      workId: configuredWorkId,
+      type: 'ongoing',
+      expectedRevision: goalRerun.payload.value.revision,
+    })
+    const ongoingReady = await call(route, 'moveWork', {
+      workId: configuredWorkId,
+      columnId: 'ready',
+      expectedRevision: ongoing.payload.value.revision,
+    })
+    const ongoingRerun = await call(route, 'runWork', {
+      workId: configuredWorkId,
+      expectedRevision: ongoingReady.payload.value.revision,
+    })
+    assert.equal(ongoingRerun.response.status, 200, ongoingRerun.response.body)
+    assert.equal(ongoingRerun.payload.value.run.mode, 'reused')
+    assert.equal(
+      ongoingRerun.payload.value.run.sessionId,
+      goalRerun.payload.value.run.sessionId,
+    )
+    assert.equal(createCount, 3)
+    assert.equal(resumeCount, 0)
+
+    liveAgents.delete(ongoingRerun.payload.value.run.sessionId)
+    const resumedReady = await call(route, 'moveWork', {
+      workId: configuredWorkId,
+      columnId: 'ready',
+      expectedRevision: ongoingRerun.payload.value.revision,
+    })
+    const resumed = await call(route, 'runWork', {
+      workId: configuredWorkId,
+      expectedRevision: resumedReady.payload.value.revision,
+    })
+    assert.equal(resumed.response.status, 200, resumed.response.body)
+    assert.equal(resumed.payload.value.run.mode, 'reused')
+    assert.equal(
+      resumed.payload.value.run.sessionId,
+      ongoingRerun.payload.value.run.sessionId,
+    )
+    assert.equal(createCount, 3)
+    assert.equal(resumeCount, 1)
+    assert.equal(
+      resumedOptions.resumeSessionId,
+      ongoingRerun.payload.value.run.sessionId,
+    )
+    assert.deepEqual(resumedOptions.agentOptions, {
+      provider: 'test-provider',
+      model: 'test-model',
+      reasoningEffort: 'high',
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

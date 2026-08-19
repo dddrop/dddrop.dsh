@@ -64,6 +64,10 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     '.pavo-work-title{font-weight:620;line-height:1.4;overflow-wrap:anywhere}',
     '.pavo-work-body{margin:0;max-height:120px;overflow:hidden;white-space:pre-wrap;font:inherit;font-size:12px;line-height:1.45;opacity:.76}',
     '.pavo-work-meta{display:flex;flex-wrap:wrap;gap:5px 9px;font-size:11px;opacity:.68}',
+    '.pavo-work-actions{display:flex;justify-content:flex-end;border-top:1px solid rgba(128,128,128,.18);padding:7px 9px}',
+    '.pavo-work-run{padding:4px 11px;font-size:11px}',
+    '.pavo-session-reference{display:flex;align-items:center;justify-content:space-between;gap:12px}',
+    '.pavo-session-reference code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px}',
     '.pavo-work-id{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px;opacity:.42}',
     '.pavo-flow-shell{display:flex;flex:1;min-height:0;flex-direction:column;gap:9px}',
     '.pavo-flow-breadcrumbs{display:flex;align-items:center;gap:5px;min-height:30px;overflow-x:auto;font-size:12px}',
@@ -200,6 +204,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     '.pavo-workspace-empty{border:1px dashed rgba(128,128,128,.3);border-radius:9px;padding:16px;font-size:13px;opacity:.62}',
     '.pavo-snackbar{position:fixed;right:22px;bottom:22px;z-index:1000;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:10px;width:min(380px,calc(100vw - 32px));box-sizing:border-box;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(30,30,32,.96);box-shadow:0 14px 38px rgba(0,0,0,.28);padding:12px 13px;color:#fff;animation:pavo-snackbar-in .18s ease-out}',
     '.pavo-snackbar-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#d85c5c;color:#fff;font-size:12px;font-weight:750}',
+    '.pavo-snackbar-icon-success{background:#438a61}',
     '.pavo-snackbar-copy{display:grid;gap:2px;min-width:0}',
     '.pavo-snackbar-title{font-size:13px;font-weight:650;line-height:1.35}',
     '.pavo-snackbar-message{font-size:12px;line-height:1.45;color:rgba(255,255,255,.7)}',
@@ -490,6 +495,41 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     )
   }
 
+  function workRunBlocker(work, workspaces, agentPresets) {
+    if (!work) return 'Choose a Work to run.'
+    if (work.columnId !== 'ready') return 'Move this Work to Ready before running it.'
+    if (!work.workspaceId) return 'Choose a DSH Workspace before running this Work.'
+    const workspace = workspaces.find(
+      (candidate) => candidate.id === work.workspaceId,
+    )
+    if (!workspace || workspace.unavailable) {
+      return 'The selected DSH Workspace is unavailable.'
+    }
+    if (work.assignee?.kind !== 'agent-preset') {
+      return 'Assign an Agent Preset before running this Work.'
+    }
+    const preset = agentPresets.find(
+      (candidate) => candidate.id === work.assignee.presetId,
+    )
+    if (!preset || preset.broken) {
+      return 'The selected Agent Preset is unavailable.'
+    }
+    return ''
+  }
+
+  function workRunLabel(work) {
+    return work?.sessionId ? 'Re-run' : 'Run'
+  }
+
+  function workRunTitle(work) {
+    if (!work?.sessionId) {
+      return 'Create an Agent Session and move this Work to In Progress.'
+    }
+    return work.type === 'ongoing'
+      ? 'Reuse the linked Agent Session and move this Work to In Progress.'
+      : 'Create a new Agent Session and move this Work to In Progress.'
+  }
+
   function workflowPath(workflows, workflowId) {
     const byId = new Map(workflows.map((workflow) => [workflow.id, workflow]))
     const result = []
@@ -723,6 +763,8 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     onSave,
     onRemove,
     onSaveTemplate,
+    onRun,
+    onOpenSession,
   }) {
     if (!mode) return null
     const creating = mode === 'create'
@@ -732,6 +774,9 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     const column = work
       ? columns.find((candidate) => candidate.id === work.columnId)
       : undefined
+    const runBlocker = work
+      ? workRunBlocker(work, workspaces, agentPresets)
+      : 'Save this Work before running it.'
     const heading = creating ? 'Create Work' : draft.title || 'Work details'
     const eyebrow = creating
       ? 'New Work'
@@ -868,6 +913,32 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                       work?.updatedAt ? new Date(work.updatedAt).toLocaleString() : '',
                     ),
                   ),
+                  work?.sessionId
+                    ? React.createElement(
+                        'div',
+                        { className: 'pavo-drawer-meta-row' },
+                        React.createElement(
+                          'span',
+                          { className: 'pavo-drawer-meta-label' },
+                          'Session',
+                        ),
+                        React.createElement(
+                          'div',
+                          { className: 'pavo-session-reference' },
+                          React.createElement('code', null, work.sessionId),
+                          React.createElement(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'pavo-button',
+                              disabled: busy,
+                              onClick: () => onOpenSession(work.sessionId),
+                            },
+                            'Open Session',
+                          ),
+                        ),
+                      )
+                    : null,
                   React.createElement(
                     'div',
                     { className: 'pavo-drawer-meta-row' },
@@ -888,6 +959,22 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         React.createElement(
           'footer',
           { className: 'pavo-drawer-footer' },
+          !creating
+            ? React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'pavo-button pavo-button-primary',
+                  disabled:
+                    busy || stale || !workIsSaved || Boolean(runBlocker),
+                  title: !workIsSaved
+                    ? 'Save the Work changes before running it.'
+                    : runBlocker || workRunTitle(work),
+                  onClick: () => onRun(work),
+                },
+                workRunLabel(work),
+              )
+            : null,
           !creating
             ? React.createElement(
                 'button',
@@ -2057,6 +2144,8 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     onSaveWorkTemplate,
     onSaveWorkflowTemplate,
     onUpdateDependencies,
+    onRunWork,
+    onOpenSession,
     agentPresets,
     workspaces,
     busy,
@@ -2127,6 +2216,9 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     const selectedWorkflow = data.workflows.find(
       (workflow) => workflow.id === selectedWorkflowId,
     )
+    const runBlocker = selected
+      ? workRunBlocker(selected, workspaces, agentPresets)
+      : ''
     const visibleWorks = data.works.filter(
       (work) => work.workflowId === currentWorkflowId,
     )
@@ -2312,6 +2404,31 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                   },
                   'Edit Work',
                 ),
+                !runBlocker
+                  ? React.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'pavo-button pavo-button-primary',
+                        disabled: busy,
+                        title: workRunTitle(selected),
+                        onClick: () => onRunWork(selected),
+                      },
+                      workRunLabel(selected),
+                    )
+                  : null,
+                selected.sessionId
+                  ? React.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'pavo-button',
+                        disabled: busy,
+                        onClick: () => onOpenSession(selected.sessionId),
+                      },
+                      'Open Session',
+                    )
+                  : null,
                 React.createElement(
                   'button',
                   {
@@ -2497,7 +2614,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     )
   }
 
-  function Board() {
+  function Board({ sessions }) {
     const [snapshot, setSnapshot] = React.useState(null)
     const [agentPresets, setAgentPresets] = React.useState([])
     const [dshWorkspaces, setDshWorkspaces] = React.useState([])
@@ -2721,6 +2838,51 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       } finally {
         busyRef.current = false
         setBusy(false)
+      }
+    }
+
+    async function runWork(work) {
+      if (busyRef.current || !snapshot) return
+      const blocker = workRunBlocker(work, dshWorkspaces, agentPresets)
+      if (blocker) {
+        setError(blocker)
+        return
+      }
+      busyRef.current = true
+      setBusy(true)
+      const sequence = ++requestSequence.current
+      try {
+        const next = await request('runWork', {
+          workId: work.id,
+          expectedRevision: snapshot.revision,
+        })
+        if (sequence === requestSequence.current) {
+          applySnapshot(next)
+          setError(null)
+          setSnackbar({
+            kind: 'success',
+            title: work.sessionId ? 'Work running again' : 'Work running',
+            message: `Session ${next.run.sessionId} ${next.run.mode === 'reused' ? 'reused' : 'created'}. The Work moved to In Progress.`,
+          })
+        }
+      } catch (nextError) {
+        if (sequence === requestSequence.current) {
+          setError(
+            nextError instanceof Error ? nextError.message : String(nextError),
+          )
+        }
+      } finally {
+        busyRef.current = false
+        setBusy(false)
+      }
+    }
+
+    function openSession(sessionId) {
+      try {
+        if (!sessions) throw new Error('The DSH Session navigator is unavailable.')
+        sessions.open(sessionId)
+      } catch (nextError) {
+        setError(nextError instanceof Error ? nextError.message : String(nextError))
       }
     }
 
@@ -3177,8 +3339,13 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     const draggedCard = data.works.find((card) => card.id === draggedWorkId)
     const columns = data.columns.map((column) => {
       const cards = data.works.filter((card) => card.columnId === column.id)
-      const cardNodes = cards.map((card) =>
-        React.createElement(
+      const cardNodes = cards.map((card) => {
+        const runBlocker = workRunBlocker(
+          card,
+          dshWorkspaces,
+          agentPresets,
+        )
+        return React.createElement(
           'article',
           {
             key: card.id,
@@ -3247,8 +3414,25 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               ),
             ),
           ),
-        ),
-      )
+          !runBlocker
+            ? React.createElement(
+                'div',
+                { className: 'pavo-work-actions' },
+                React.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'pavo-button pavo-button-primary pavo-work-run',
+                    disabled: busy,
+                    title: workRunTitle(card),
+                    onClick: () => void runWork(card),
+                  },
+                  workRunLabel(card),
+                ),
+              )
+            : null,
+        )
+      })
 
       const dropAllowed = draggedCard ? canMove(draggedCard, column.id) : false
       const dropBlocked =
@@ -3400,6 +3584,8 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               onSaveWorkflowTemplate: (workflow) =>
                 openCaptureTemplate('workflow', workflow),
               onUpdateDependencies: updateDependencies,
+              onRunWork: runWork,
+              onOpenSession: openSession,
               agentPresets,
               workspaces: dshWorkspaces,
               busy,
@@ -3425,6 +3611,8 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         onCreate: addWork,
         onSave: saveDetails,
         onRemove: removeWork,
+        onRun: runWork,
+        onOpenSession: openSession,
         onSaveTemplate: (work) => {
           closeDrawer()
           openCaptureTemplate('work', work)
@@ -3476,10 +3664,16 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
             'div',
             {
               className: 'pavo-snackbar',
-              role: 'alert',
-              'aria-live': 'assertive',
+              role: snackbar.kind === 'success' ? 'status' : 'alert',
+              'aria-live': snackbar.kind === 'success' ? 'polite' : 'assertive',
             },
-            React.createElement('span', { className: 'pavo-snackbar-icon' }, '!'),
+            React.createElement(
+              'span',
+              {
+                className: `pavo-snackbar-icon${snackbar.kind === 'success' ? ' pavo-snackbar-icon-success' : ''}`,
+              },
+              snackbar.kind === 'success' ? '✓' : '!',
+            ),
             React.createElement(
               'div',
               { className: 'pavo-snackbar-copy' },
@@ -3809,7 +4003,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
           order: 5,
           label: 'Pavo',
         },
-        () => React.createElement(Board),
+        () => React.createElement(Board, { sessions: ctx.get('sessions') }),
       ),
     )
 

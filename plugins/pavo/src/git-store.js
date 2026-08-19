@@ -302,10 +302,10 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 8
-const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7])
-const TICKET_FORMAT_VERSION = 6
-const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4, 5])
+const BOARD_FORMAT_VERSION = 9
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7, 8])
+const TICKET_FORMAT_VERSION = 7
+const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6])
 const MAX_TICKET_ID_LENGTH = 128
 const SAFE_TICKET_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
 
@@ -371,6 +371,7 @@ function splitBoardDocuments(boardInput, workflow) {
       id: work.id,
       type: work.type,
       workspaceId: work.workspaceId,
+      sessionId: work.sessionId,
       ...(work.legacyWorkspaceTitle
         ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
         : {}),
@@ -784,7 +785,7 @@ export class GitBoardRepository {
         ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
           document.version,
         ) ||
-        ([4, 5, 6, 7, BOARD_FORMAT_VERSION].includes(document.version)
+        ([4, 5, 6, 7, 8, BOARD_FORMAT_VERSION].includes(document.version)
           ? !Array.isArray(document.works)
           : !Array.isArray(document.tickets))
       ) {
@@ -802,7 +803,7 @@ export class GitBoardRepository {
           'Current board storage must use DSH Workspace references instead of Project fields.',
         )
       }
-      const placements = ([4, 5, 6, 7, BOARD_FORMAT_VERSION].includes(document.version)
+      const placements = ([4, 5, 6, 7, 8, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
         .map((value, index) => {
@@ -886,13 +887,17 @@ export class GitBoardRepository {
             `Work ${placement.id} must use version ${[...LEGACY_TICKET_FORMAT_VERSIONS, TICKET_FORMAT_VERSION].join(', ')}.`,
           )
         }
-        if (
-          ticket.version === TICKET_FORMAT_VERSION &&
-          Object.hasOwn(ticket, 'project')
-        ) {
-          throw new TypeError(
-            `Work ${placement.id} must use workspaceId instead of project.`,
-          )
+        if (ticket.version === TICKET_FORMAT_VERSION) {
+          if (Object.hasOwn(ticket, 'project')) {
+            throw new TypeError(
+              `Work ${placement.id} must use workspaceId instead of project.`,
+            )
+          }
+          if (!Object.hasOwn(ticket, 'sessionId')) {
+            throw new TypeError(
+              `Work ${placement.id} must define its sessionId reference.`,
+            )
+          }
         }
         if (ticket.id !== placement.id) {
           throw new TypeError(
@@ -908,6 +913,7 @@ export class GitBoardRepository {
           id: ticket.id,
           type: ticket.type ?? 'goal',
           workspaceId: ticket.workspaceId ?? '',
+          sessionId: ticket.sessionId ?? '',
           ...(ticket.legacyWorkspaceTitle || ticket.project
             ? {
                 legacyWorkspaceTitle:
@@ -1227,7 +1233,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'refactor(pavo): use DSH Workspaces',
+      'feat(pavo): add Agent execution references',
       snapshot.board,
     )
     this.cachedSnapshot = migrated

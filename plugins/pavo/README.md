@@ -13,7 +13,8 @@ Pavo is a Git-backed Work board and dependency canvas for the DeepSeek Harness W
   - `ongoing`: continuously maintained Work.
 - Uses each Work's `Description` directly as the Prompt an Agent reads. Pavo does not interpret the Description or require a fixed result protocol.
 - Stores dependency relationships and acknowledged upstream versions in each downstream Work's `upstreamWaterLevels` dictionary.
-- Allows directed cycles and bidirectional dependencies. Pavo does not schedule, propagate, increment WaterLevels, terminate loops, or acknowledge upstream versions automatically.
+- Allows directed cycles and bidirectional dependencies. Pavo never auto-schedules, propagates, increments WaterLevels, terminates loops, or acknowledges upstream versions.
+- Adds explicit user-triggered `Run` and `Re-run` actions for eligible Ready Works; Goal re-runs create a new Session, while Ongoing re-runs preserve context by reusing their linked Session.
 - Uses one global board shared by every DSH workspace and session.
 - Creates one semantic Git commit for every Work, Workflow, or Template mutation.
 - Provides a shared Git-backed Template Library for reusable Work records and complete nested Workflow subtrees.
@@ -31,6 +32,7 @@ A normalized Work has this shape:
   "id": "work-release",
   "type": "goal",
   "workspaceId": "019c-workspace-id",
+  "sessionId": "session-019c-run-id",
   "key": "PAVO-12",
   "title": "Release v1.0.0",
   "description": "Complete checks and release v1.0.0.",
@@ -78,7 +80,7 @@ The fixed Root Workflow uses ID `root`, title `Root Workflow`, and `parentWorkfl
 { "kind": "agent-preset", "presetId": "standard" }
 ```
 
-The browser labels `human` as `Me` and reads the current Agent Preset roster from the optional Host `agentPresets` Service. A Preset assignment is only a stable reference: Pavo never creates or executes an Agent from it. If a referenced Preset is deleted or becomes unavailable, the Work retains its `presetId` and the UI marks it unavailable instead of clearing or reassigning it. Legacy non-empty freeform Assignee labels migrate to an unassigned value with a preserved `legacyLabel` so Pavo does not invent an Agent Preset identity.
+The browser labels `human` as `Me` and reads the current Agent Preset roster from the Host `agentPresets` Service. An Agent Preset assignment remains metadata until a user explicitly clicks `Run` on an eligible Work. If a referenced Preset is deleted, broken, or otherwise unavailable, the Work retains its `presetId`, the UI marks it unavailable, and Run is blocked instead of clearing or reassigning it. Legacy non-empty freeform Assignee labels migrate to an unassigned value with a preserved `legacyLabel` so Pavo does not invent an Agent Preset identity.
 
 `workspaceId` is either an empty string or the stable ID of a Workspace registered in DSH. Pavo reads the current roster from the Host `workspaceRegistry` Service, displays the current Workspace title, and never creates, renames, reorders, or removes DSH Workspaces. Workspace renames therefore update the Pavo label without rewriting Work data. A deleted or unavailable Workspace remains referenced by ID and is visibly marked unavailable until the user clears or changes it. Browser and Agent payloads expose only Workspace ID, title, and availability—not directory paths or session membership. Legacy non-empty Project names migrate to an unassigned Workspace with a preserved `legacyWorkspaceTitle`; Pavo never guesses identity from a display title.
 
@@ -95,7 +97,18 @@ Compare the upstream Work's current `waterLevel` with the recorded value:
 
 WaterLevels are canonical non-negative decimal strings with arbitrary precision. Pavo never compares them through JavaScript floating-point numbers. Self-dependencies and references to missing Works are rejected. Multi-Work cycles are valid. A referenced upstream Work cannot be deleted until downstream references are removed.
 
-Pavo is deliberately passive. An Agent reads a Work and its upstream context, executes the Description according to its own judgment, and explicitly edits the Work. The Agent may change the Description, type, status column, WaterLevel, dependency dictionary, or other editable fields. Pavo does not infer any of these updates from execution output.
+## Explicit Agent execution
+
+`Run` and `Re-run` are deliberately user-triggered rather than an automatic scheduler. The action is available only when the Work is in `Ready`, references an available DSH Workspace, and is assigned to an available Agent Preset.
+
+The first Run creates an idle top-level Agent Session using the current default model, mounts the selected Preset, attaches the Session to the Workspace, and pins the Session title to the Work title. A linked Work can be moved back to Ready and run again:
+
+- A `goal` Re-run creates a new Session. The Work's `sessionId` changes to the newest Session; earlier Goal Sessions remain available in the DSH Workspace history.
+- An `ongoing` Re-run reuses its linked Session. Pavo uses the live Agent when available or resumes the persisted Session after a Host restart. Because the Session's composition is durable, the Work must still reference the same Workspace and Agent Preset.
+
+Pavo commits one optimistic Work claim that records the selected `sessionId` and moves `Ready` to `In Progress`. Only after that Git claim succeeds does Pavo submit the current Work `Description` unchanged as a new user Prompt. Concurrent Run or Re-run requests for the same Work share one in-flight operation.
+
+A recorded `sessionId` is durable transcript linkage. `Open Session` selects the current Session from the Work drawer or Flow inspector. Pavo does not infer completion, modify WaterLevels, acknowledge dependencies, or move the Work beyond In Progress from Agent output. Those changes remain explicit user or Agent mutations.
 
 ## Template Library
 
@@ -107,7 +120,7 @@ Templates remain passive data. Creating or instantiating one never executes an A
 
 ## Agent tools
 
-When the Host provides the optional `tools` Service, Pavo registers seven global tools backed by the same `RepositoryController` as the browser API:
+When the Host provides the optional `tools` Service, Pavo registers seven global tools backed by the same `RepositoryController` as the browser API. Agent tools can inspect and edit records but intentionally cannot invoke Run; execution requires an explicit browser action by the user:
 
 - `pavo_list_works`: lists Works, Workflow containers, status columns, sanitized DSH Workspace and Agent Preset choices, and the current board revision; it can filter exact Workspace ID, Workflow membership, or structured Assignee.
 - `pavo_read_work`: reads one Work, its Description, upstream context, and Root-to-Work Workflow path.
@@ -131,16 +144,16 @@ Pavo intentionally keeps the default `dataDirectory` as `kanban` and the existin
     └── ...
 ```
 
-`board.json` storage version 8 contains columns, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 6 and contain `id`, `type`, `workspaceId`, optional migration-only `legacyWorkspaceTitle`, `key`, `title`, `description`, structured `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps. DSH Workspace titles are live registry metadata and are not duplicated into canonical Pavo storage.
+`board.json` storage version 9 contains columns, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 7 and contain `id`, `type`, `workspaceId`, `sessionId`, optional migration-only `legacyWorkspaceTitle`, `key`, `title`, `description`, structured `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps. DSH Workspace titles are live registry metadata and are not duplicated into canonical Pavo storage. Templates never capture Session IDs.
 
 The reader remains compatible with:
 
 - Combined legacy `board.json` files with `cards` and `body`.
 - Split board versions 2 and 3 with `tickets` placements.
-- Split board versions 4 through 7 with `works` placements.
-- Ticket versions 1 through 5.
+- Split board versions 4 through 8 with `works` placements.
+- Ticket versions 1 through 6.
 
-Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, and data without Workflow membership is assigned to the synthesized Root Workflow. Legacy Assignee strings become structured values without being treated as Agent Preset IDs. Non-empty legacy Project names become `legacyWorkspaceTitle` with an empty `workspaceId`; migration deliberately does not guess a DSH Workspace ID from a mutable title. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `refactor(pavo): use DSH Workspaces` when write policy permits it.
+Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, missing `sessionId` becomes an empty string, and data without Workflow membership is assigned to the synthesized Root Workflow. Legacy Assignee strings become structured values without being treated as Agent Preset IDs. Non-empty legacy Project names become `legacyWorkspaceTitle` with an empty `workspaceId`; migration deliberately does not guess a DSH Workspace ID from a mutable title. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `feat(pavo): add Agent execution references` when write policy permits it.
 
 The Host keeps `/_dddrop/kanban` and the browser snapshot's derived `cards` alias for already-loaded legacy clients. Canonical storage and current clients use Works.
 
@@ -150,7 +163,7 @@ The package has two faces mounted by one Cordis Loader row:
 
 - The Host registers fenced same-origin JSON endpoints through `ctx.webServer`. `GitBoardRepository` uses an in-process queue and a Git-directory lock to serialize synchronization, validation, atomic writes, commits, and pushes across Host processes.
 - `RepositoryController` owns the active repository, validates and atomically persists Settings changes, and restores a saved override on Host startup.
-- The Host requires `workspaceRegistry` for stable DSH Workspace references, optionally registers Agent tools through `ctx.get('tools')`, and reads sanitized Agent Preset metadata through `ctx.get('agentPresets')` without introducing a scheduler or background Agent.
+- The Host requires `workspaceRegistry`, `agents`, `agentPresets`, `agentDefaultModel`, and `sessionTitle` for explicit Run operations. It optionally registers record-management Agent tools through `ctx.get('tools')`; those tools do not expose Run.
 - The Client registers the `Pavo` tab in `conversation.view`, bundles `@xyflow/react` into its committed browser module, and registers the consolidated Pavo page in `settings.section`.
 
 The browser bundle is committed at `lib/client.js` because DSH loads prebuilt client bundles. Rebuild after changing `src/client.js`:

@@ -10,18 +10,31 @@ import {
   removeTemplate,
   removeWork,
   removeWorkflow,
+  startWork,
   updateTemplate,
   updateWork,
   updateWorkflow,
   workTemplateContentFromWork,
   workflowTemplateContentFromWorkflow,
 } from './board.js'
-import { Config, RepositoryError } from './git-store.js'
+import {
+  Config,
+  RepositoryError,
+  StaleRevisionError,
+} from './git-store.js'
 import { RepositoryController } from './repository-settings.js'
 import { uuidv7 } from './uuid-v7.js'
 
 export const name = 'dddrop-pavo'
-export const inject = ['webServer', 'webRuntime', 'workspaceRegistry']
+export const inject = [
+  'webServer',
+  'webRuntime',
+  'workspaceRegistry',
+  'agents',
+  'agentPresets',
+  'agentDefaultModel',
+  'sessionTitle',
+]
 export { Config }
 
 const API_PATH = '/_dddrop/pavo'
@@ -290,6 +303,256 @@ async function publicWorkspaces(workspaceRegistry) {
   )
 }
 
+function installRunModelSelection(agentCtx, selection) {
+  let assembled
+  agentCtx.on(
+    'system-prompt/assemble',
+    async (_assembly, _context, next) => {
+      const prompt = await next()
+      assembled = selection
+      return {
+        ...prompt,
+        variables: {
+          ...prompt.variables,
+          provider: selection.provider,
+          model: selection.model,
+        },
+      }
+    },
+  )
+  agentCtx.on('agent/request', async (_payload, next) => {
+    const request = await next()
+    if (!assembled) return request
+    const { reasoningEffort: _inheritedEffort, ...base } = request
+    return {
+      ...base,
+      provider: assembled.provider,
+      model: assembled.model,
+      ...(assembled.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: assembled.reasoningEffort }),
+    }
+  })
+}
+
+function createRunPrompt(description) {
+  return Object.freeze({
+    id: uuidv7(),
+    role: 'user',
+    content: Object.freeze([
+      Object.freeze({ type: 'text', text: description }),
+    ]),
+    source: Object.freeze({ kind: 'user' }),
+  })
+}
+
+async function cleanupUnstartedSession(workspaceRegistry, workspace, handle) {
+  const failures = []
+  try {
+    await workspace.detachSession(handle.agent.id)
+  } catch (error) {
+    failures.push(error)
+  }
+  try {
+    await handle.dispose()
+  } catch (error) {
+    failures.push(error)
+  }
+  try {
+    await workspaceRegistry.archiveSession(handle.agent.id)
+  } catch (error) {
+    failures.push(error)
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      `The unstarted Session could not be cleaned up completely: ${failures.map(String).join('; ')}`,
+    )
+  }
+}
+
+async function launchWorkSession(controller, args, services) {
+  const snapshot = await controller.overview()
+  if (
+    typeof args.expectedRevision !== 'string' ||
+    args.expectedRevision !== snapshot.revision
+  ) {
+    throw new StaleRevisionError()
+  }
+  const work = snapshot.board.works.find(
+    (candidate) => candidate.id === args.workId,
+  )
+  if (!work) throw new RequestError(`Unknown Work: ${args.workId}`)
+  if (work.columnId !== 'ready') {
+    throw new RequestError('A Work must be Ready before it can run.')
+  }
+  if (!work.workspaceId) {
+    throw new RequestError('Choose a DSH Workspace before running this Work.')
+  }
+  const workspace = services.workspaceRegistry.get(work.workspaceId)
+  let workspaceAvailable = false
+  try {
+    workspaceAvailable = workspace !== undefined && (await workspace.status()) === 'ok'
+  } catch {
+    workspaceAvailable = false
+  }
+  if (!workspaceAvailable) {
+    throw new RequestError(`Workspace ${work.workspaceId} is unavailable.`)
+  }
+  if (work.assignee.kind !== 'agent-preset') {
+    throw new RequestError(
+      'Assign an Agent Preset before running this Work.',
+    )
+  }
+  let preset
+  try {
+    preset = await services.agentPresets.resolve(work.assignee.presetId)
+  } catch {
+    throw new RequestError(
+      `Agent Preset ${work.assignee.presetId} is unavailable.`,
+    )
+  }
+  if (preset.broken) {
+    throw new RequestError(`Agent Preset ${preset.id} is unavailable.`)
+  }
+  const selection = services.agentDefaultModel.currentSelection()
+  const reuseSession = work.type === 'ongoing' && Boolean(work.sessionId)
+  const sessionId = reuseSession ? work.sessionId : `session-${uuidv7()}`
+  const agentOptions = {
+    provider: selection.provider,
+    model: selection.model,
+    ...(selection.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: selection.reasoningEffort }),
+  }
+  const setup = async (agentCtx) => {
+    const sessionPreset = agentCtx.agent.session.header.agentPreset
+    const sessionCwd = agentCtx.agent.session.header.cwd
+    if (reuseSession && sessionPreset !== preset.id) {
+      throw new RequestError(
+        `Session ${sessionId} uses Agent Preset ${sessionPreset ?? '(none)'} instead of ${preset.id}.`,
+      )
+    }
+    if (reuseSession && sessionCwd !== workspace.path) {
+      throw new RequestError(
+        `Session ${sessionId} belongs to a different Workspace.`,
+      )
+    }
+    installRunModelSelection(agentCtx, selection)
+    await services.agentPresets.mount(agentCtx, preset.id)
+  }
+
+  let handle
+  let agent = reuseSession ? services.agents.get(sessionId) : undefined
+  try {
+    if (agent) {
+      if (agent.session.header.agentPreset !== preset.id) {
+        throw new RequestError(
+          `Session ${sessionId} uses Agent Preset ${agent.session.header.agentPreset ?? '(none)'} instead of ${preset.id}.`,
+        )
+      }
+      if (agent.session.header.cwd !== workspace.path) {
+        throw new RequestError(
+          `Session ${sessionId} belongs to a different Workspace.`,
+        )
+      }
+    } else if (reuseSession) {
+      handle = await services.agents.resume({
+        resumeSessionId: sessionId,
+        agentOptions,
+        setup,
+      })
+      agent = handle.agent
+    } else {
+      handle = await services.agents.create({
+        sessionId,
+        meta: {
+          cwd: workspace.path,
+          agentPreset: preset.id,
+        },
+        agentOptions,
+        setup,
+      })
+      agent = handle.agent
+    }
+  } catch (error) {
+    if (error instanceof RequestError) throw error
+    throw new RequestError(
+      `The Agent Session could not be ${reuseSession ? 'resumed' : 'created'}: ${String(error)}`,
+      500,
+    )
+  }
+
+  let claimedSnapshot
+  try {
+    if (!reuseSession) await workspace.attachSession(sessionId)
+    services.sessionTitle.rename(agent.session, work.title)
+    claimedSnapshot = await controller.mutate({
+      expectedRevision: snapshot.revision,
+      commitMessage: 'feat(pavo): run work',
+      mutation: (board) =>
+        startWork(
+          board,
+          {
+            workId: work.id,
+            sessionId,
+            updatedAt: new Date().toISOString(),
+          },
+          { workflow: controller.config.columns },
+        ),
+    })
+  } catch (error) {
+    const current = await controller.overview().catch(() => undefined)
+    const claimed = current?.board.works.find(
+      (candidate) => candidate.id === work.id,
+    )
+    if (
+      claimed?.sessionId === sessionId &&
+      claimed.columnId === 'in-progress'
+    ) {
+      claimedSnapshot = current
+    } else {
+      try {
+        if (reuseSession) {
+          if (handle) await handle.dispose()
+        } else {
+          await cleanupUnstartedSession(
+            services.workspaceRegistry,
+            workspace,
+            handle,
+          )
+        }
+      } catch (cleanupError) {
+        throw new RequestError(
+          `${String(error)} ${String(cleanupError)}`,
+          500,
+        )
+      }
+      throw error
+    }
+  }
+
+  try {
+    await agent.whenIdle()
+    agent.followup(createRunPrompt(work.description))
+  } catch (error) {
+    throw new RequestError(
+      `Session ${sessionId} was ${reuseSession ? 'reused' : 'created'} and linked, but its Work prompt could not start: ${String(error)}`,
+      500,
+    )
+  }
+
+  return {
+    ...publicSnapshot(claimedSnapshot, controller),
+    run: {
+      sessionId,
+      workId: work.id,
+      workspaceId: workspace.id,
+      agentPresetId: preset.id,
+      mode: reuseSession ? 'reused' : 'created',
+    },
+  }
+}
+
 function mergedWorkInput(work, args) {
   return {
     ...work,
@@ -350,7 +613,7 @@ function templateContentFromArgs(board, args, kind) {
   throw new TypeError('Template kind must be work or workflow.')
 }
 
-async function dispatch(controller, request, agentPresets, workspaceRegistry) {
+async function dispatch(controller, request, services, runOperations) {
   const body = await readJsonBody(request)
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new RequestError('The request body must be an object.')
@@ -372,9 +635,11 @@ async function dispatch(controller, request, agentPresets, workspaceRegistry) {
     case 'overview':
       return publicSnapshot(await controller.overview(), controller)
     case 'agentPresets':
-      return { presets: await publicAgentPresets(agentPresets) }
+      return { presets: await publicAgentPresets(services.agentPresets) }
     case 'workspaces':
-      return { workspaces: await publicWorkspaces(workspaceRegistry) }
+      return {
+        workspaces: await publicWorkspaces(services.workspaceRegistry),
+      }
     case 'saveRepository':
       assertRepositorySettingsRequest(request)
       return controller.updateRepository(
@@ -394,6 +659,7 @@ async function dispatch(controller, request, agentPresets, workspaceRegistry) {
                 id: uuidv7(),
                 type: args.type ?? 'goal',
                 workspaceId: args.workspaceId ?? '',
+                sessionId: '',
                 key: args.key,
                 title: args.title,
                 description: args.description ?? args.body ?? '',
@@ -578,6 +844,31 @@ async function dispatch(controller, request, agentPresets, workspaceRegistry) {
       throw new RequestError(
         'Pavo Projects were replaced by DSH Workspace references.',
       )
+    case 'runWork': {
+      if (typeof args.workId !== 'string' || args.workId.trim().length === 0) {
+        throw new RequestError('Run requires a Work id.')
+      }
+      const workId = args.workId.trim()
+      const existing = runOperations.get(workId)
+      if (existing) {
+        if (args.expectedRevision !== existing.expectedRevision) {
+          throw new StaleRevisionError()
+        }
+        return existing.operation
+      }
+      const operation = launchWorkSession(
+        controller,
+        { ...args, workId },
+        services,
+      ).finally(() => {
+        runOperations.delete(workId)
+      })
+      runOperations.set(workId, {
+        expectedRevision: args.expectedRevision,
+        operation,
+      })
+      return operation
+    }
     case 'move':
     case 'moveWork':
       return publicSnapshot(
@@ -616,12 +907,8 @@ async function dispatch(controller, request, agentPresets, workspaceRegistry) {
   }
 }
 
-function createHandler(
-  controller,
-  trustedHosts,
-  agentPresets,
-  workspaceRegistry,
-) {
+function createHandler(controller, trustedHosts, services) {
+  const runOperations = new Map()
   return async (request, response) => {
     try {
       assertTrustedRequest(request, trustedHosts)
@@ -633,8 +920,8 @@ function createHandler(
       const value = await dispatch(
         controller,
         request,
-        agentPresets,
-        workspaceRegistry,
+        services,
+        runOperations,
       )
       sendJson(response, 200, { ok: true, value })
     } catch (error) {
@@ -670,6 +957,7 @@ function workView(work) {
     id: work.id,
     type: work.type,
     workspaceId: work.workspaceId,
+    sessionId: work.sessionId,
     ...(work.legacyWorkspaceTitle
       ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
       : {}),
@@ -703,6 +991,7 @@ function workSummary(work) {
     id: work.id,
     type: work.type,
     workspaceId: work.workspaceId,
+    sessionId: work.sessionId,
     ...(work.legacyWorkspaceTitle
       ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
       : {}),
@@ -816,6 +1105,7 @@ const WORK_SUMMARY_SCHEMA = {
     id: { type: 'string', required: true },
     type: { type: 'string', enum: ['goal', 'ongoing'], required: true },
     workspaceId: { type: 'string', required: true },
+    sessionId: { type: 'string', required: true },
     legacyWorkspaceTitle: { type: 'string' },
     key: { type: 'string', required: true },
     title: { type: 'string', required: true },
@@ -847,6 +1137,7 @@ const WORK_SCHEMA = {
     id: { type: 'string', required: true },
     type: { type: 'string', enum: ['goal', 'ongoing'], required: true },
     workspaceId: { type: 'string', required: true },
+    sessionId: { type: 'string', required: true },
     legacyWorkspaceTitle: { type: 'string' },
     key: { type: 'string', required: true },
     title: { type: 'string', required: true },
@@ -956,7 +1247,7 @@ function registerAgentTools(ctx, controller) {
     async execute(args) {
       const [snapshot, agentPresetList, workspaceList] = await Promise.all([
         controller.overview(),
-        publicAgentPresets(ctx.get('agentPresets')),
+        publicAgentPresets(ctx.agentPresets),
         publicWorkspaces(ctx.workspaceRegistry),
       ])
       const workspaceTitles = new Map(
@@ -980,6 +1271,7 @@ function registerAgentTools(ctx, controller) {
           work.title,
           work.description,
           work.workspaceId,
+          work.sessionId,
           workspaceTitles.get(work.workspaceId) ?? work.legacyWorkspaceTitle ?? '',
           assigneeText(work.assignee),
         ].some((value) => value.toLocaleLowerCase('en-US').includes(query))
@@ -1619,13 +1911,13 @@ function registerAgentTools(ctx, controller) {
 export async function apply(ctx, config) {
   const controller = await RepositoryController.create(config)
   const trustedHosts = ctx.get('webRuntime')?.trustedHosts ?? []
-  const agentPresets = ctx.get('agentPresets')
-  const handler = createHandler(
-    controller,
-    trustedHosts,
-    agentPresets,
-    ctx.workspaceRegistry,
-  )
+  const handler = createHandler(controller, trustedHosts, {
+    workspaceRegistry: ctx.workspaceRegistry,
+    agents: ctx.agents,
+    agentPresets: ctx.agentPresets,
+    agentDefaultModel: ctx.agentDefaultModel,
+    sessionTitle: ctx.sessionTitle,
+  })
 
   for (const path of [API_PATH, LEGACY_API_PATH]) {
     ctx.effect(() =>

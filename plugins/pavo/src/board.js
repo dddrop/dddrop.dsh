@@ -303,6 +303,12 @@ function normalizeEditableFields(
   return {
     type: normalizeWorkType(input?.type),
     ...normalizeWorkspaceReference(input),
+    sessionId: requireString(
+      input?.sessionId ?? '',
+      'Work sessionId',
+      MAX_ID_LENGTH,
+      { allowEmpty: true },
+    ),
     key: requireString(input?.key ?? '', 'Work key', MAX_KEY_LENGTH, {
       allowEmpty: true,
     }),
@@ -420,6 +426,7 @@ function normalizeTemplateWorkContent(
   const fields = normalizeEditableFields(
     {
       ...source,
+      sessionId: '',
       upstreamWaterLevels: source.upstreamWaterLevels ?? {},
       workflowId: source.workflowId ?? ROOT_WORKFLOW_ID,
     },
@@ -433,8 +440,13 @@ function normalizeTemplateWorkContent(
   if (!columnIds.has(columnId)) {
     throw new TypeError(`Work template references an unknown column: ${columnId}`)
   }
-  if (includeRelations) return { ...fields, columnId }
-  const { upstreamWaterLevels: _upstreamWaterLevels, workflowId: _workflowId, ...contentFields } = fields
+  const { sessionId: _sessionId, ...templateFields } = fields
+  if (includeRelations) return { ...templateFields, columnId }
+  const {
+    upstreamWaterLevels: _upstreamWaterLevels,
+    workflowId: _workflowId,
+    ...contentFields
+  } = templateFields
   return { ...contentFields, columnId }
 }
 
@@ -630,6 +642,7 @@ export function createDefaultBoard({
         id: workId,
         type: 'goal',
         workspaceId: '',
+        sessionId: '',
         key: 'WELCOME',
         title: `Move this Work to ${columns[1]?.title ?? columns[0].title} to try the board.`,
         description: '',
@@ -1215,6 +1228,33 @@ export function moveWork(boardInput, input, { workflow } = {}) {
 
   work.columnId = columnId
   return board
+}
+
+export function startWork(boardInput, input, { workflow } = {}) {
+  const board = normalizeBoard(boardInput, { workflow })
+  const workId = requireString(input?.workId, 'Work id', MAX_ID_LENGTH)
+  const sessionId = requireString(
+    input?.sessionId,
+    'Work sessionId',
+    MAX_ID_LENGTH,
+  )
+  const work = board.works.find((candidate) => candidate.id === workId)
+  if (!work) throw new TypeError(`Unknown Work: ${workId}`)
+  if (work.columnId !== 'ready') {
+    throw new TypeError(`Work ${workId} must be Ready before it can run.`)
+  }
+  const started = moveWork(
+    board,
+    { workId, columnId: 'in-progress' },
+    { workflow },
+  )
+  const running = started.works.find((candidate) => candidate.id === workId)
+  running.sessionId = sessionId
+  running.updatedAt = normalizeTimestamp(
+    input?.updatedAt,
+    new Date().toISOString(),
+  )
+  return started
 }
 
 export function removeWork(boardInput, input, { workflow } = {}) {

@@ -18,6 +18,7 @@ import {
   removeTemplate,
   removeWork,
   removeWorkflow,
+  startWork,
   updateTemplate,
   updateWork,
   updateWorkflow,
@@ -642,6 +643,46 @@ test('compares arbitrary-precision WaterLevels without floating point', () => {
   assert.throws(() => compareWaterLevels('1e3', '1000'), /without an exponent/)
 })
 
+test('starts only Ready Works and records their Agent Session', () => {
+  const board = createBoard()
+  const ready = moveWork(board, {
+    workId: 'welcome-work',
+    columnId: 'ready',
+  })
+  const started = startWork(ready, {
+    workId: 'welcome-work',
+    sessionId: 'session-pavo-run',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+  })
+  assert.equal(started.works[0].columnId, 'in-progress')
+  assert.equal(started.works[0].sessionId, 'session-pavo-run')
+  assert.equal(started.works[0].updatedAt, '2026-01-02T00:00:00.000Z')
+  assert.equal(ready.works[0].columnId, 'ready')
+  assert.equal(ready.works[0].sessionId, '')
+  const readyAgain = moveWork(started, {
+    workId: 'welcome-work',
+    columnId: 'ready',
+  })
+  const restarted = startWork(readyAgain, {
+    workId: 'welcome-work',
+    sessionId: 'session-pavo-rerun',
+  })
+  assert.equal(restarted.works[0].columnId, 'in-progress')
+  assert.equal(restarted.works[0].sessionId, 'session-pavo-rerun')
+  assert.throws(
+    () =>
+      startWork(board, {
+        workId: 'welcome-work',
+        sessionId: 'session-too-early',
+      }),
+    /must be Ready/,
+  )
+  assert.equal(
+    workTemplateContentFromWork(started.works[0]).sessionId,
+    undefined,
+  )
+})
+
 test('enforces workflow transitions and Work field validation', () => {
   const board = addWork(
     createBoard(),
@@ -691,7 +732,15 @@ test('generates monotonic UUIDv7 identifiers across clock regressions', () => {
 
 test('declares a statically configured Host plugin', () => {
   assert.equal(name, 'dddrop-pavo')
-  assert.deepEqual(inject, ['webServer', 'webRuntime', 'workspaceRegistry'])
+  assert.deepEqual(inject, [
+    'webServer',
+    'webRuntime',
+    'workspaceRegistry',
+    'agents',
+    'agentPresets',
+    'agentDefaultModel',
+    'sessionTitle',
+  ])
   const valid = Config['~standard'].validate({
     repositoryPath: '/tmp/pavo-data',
     autoPull: false,
