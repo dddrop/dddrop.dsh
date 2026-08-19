@@ -32,4 +32,4 @@
             allowedTransitions: [in-progress, done]
           - id: done
             title: Done
-            allowedTransitions: [review]
+            allowedTransitions: [review, backlog]

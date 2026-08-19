@@ -56,6 +56,11 @@ window.__ModuleLoader__.load({
     '.pavo-title{font-size:16px;font-weight:650;letter-spacing:-.01em}',
     '.pavo-status{font-size:12px;opacity:.62}',
     '.pavo-toolbar-actions{display:flex;align-items:center;gap:8px}',
+    '.pavo-auto-toggle{display:inline-flex;align-items:center;gap:7px;min-height:36px;border:1px solid rgba(128,128,128,.28);border-radius:9px;background:transparent;color:inherit;padding:5px 10px;cursor:pointer;font:inherit;font-size:12px;font-weight:650}',
+    '.pavo-auto-toggle::before{content:"";width:7px;height:7px;border-radius:50%;background:rgba(128,128,128,.65)}',
+    '.pavo-auto-toggle[aria-pressed="true"]{border-color:rgba(67,138,97,.55);background:rgba(67,138,97,.11);color:#438a61}',
+    '.pavo-auto-toggle[aria-pressed="true"]::before{background:#438a61;box-shadow:0 0 0 3px rgba(67,138,97,.13)}',
+    '.pavo-auto-toggle:disabled{cursor:not-allowed;opacity:.45}',
     '.pavo-view-switch{display:inline-flex;border:1px solid rgba(128,128,128,.28);border-radius:9px;padding:2px;background:rgba(128,128,128,.055)}',
     '.pavo-view-switch button{min-height:30px;border:0;border-radius:6px;background:transparent;color:inherit;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px;font-weight:620;opacity:.58}',
     '.pavo-view-switch button:hover{opacity:.9}',
@@ -2686,7 +2691,13 @@ window.__ModuleLoader__.load({
       )
       setTargetColumn((current) => current || next.board.columns[0]?.id || '')
       setSelectedFlowNodeId((current) => current)
-      setError(typeof next.syncError === 'string' ? next.syncError : null)
+      setError(
+        typeof next.syncError === 'string'
+          ? next.syncError
+          : typeof next.automationStatus?.lastError === 'string'
+            ? `Automatic mode: ${next.automationStatus.lastError}`
+            : null,
+      )
     }, [])
 
     const load = React.useCallback(
@@ -2921,6 +2932,23 @@ window.__ModuleLoader__.load({
 
     function mutationArgs(args) {
       return { ...args, expectedRevision: snapshot?.revision }
+    }
+
+    async function toggleAutoMode() {
+      if (!snapshot) return
+      const enabled = !snapshot.board.autoMode.enabled
+      const saved = await run(() =>
+        request('setAutoMode', mutationArgs({ enabled })),
+      )
+      if (saved) {
+        setSnackbar({
+          kind: 'success',
+          title: enabled ? 'Automatic mode enabled' : 'Automatic mode disabled',
+          message: enabled
+            ? 'Eligible Backlog Works will become Ready, and Agent-assigned Ready Works will start automatically.'
+            : 'Pavo will stop changing Work status and starting Agents automatically.',
+        })
+      }
     }
 
     function rememberFocus() {
@@ -3514,6 +3542,20 @@ window.__ModuleLoader__.load({
         React.createElement(
           'div',
           { className: 'pavo-toolbar-actions' },
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'pavo-auto-toggle',
+              'aria-pressed': snapshot.board.autoMode.enabled,
+              title: snapshot.board.autoMode.enabled
+                ? 'Disable automatic Work readiness and Agent execution'
+                : 'Enable automatic Work readiness and Agent execution',
+              disabled: busy,
+              onClick: toggleAutoMode,
+            },
+            snapshot.board.autoMode.enabled ? 'Auto on' : 'Auto off',
+          ),
           React.createElement(
             'div',
             { className: 'pavo-view-switch', 'aria-label': 'Pavo view' },

@@ -23,6 +23,7 @@ import {
   createDefaultBoard,
   moveWork,
   removeWork,
+  setAutoMode,
   startWork,
   updateWork,
   workTemplateContentFromWork,
@@ -211,6 +212,29 @@ test('serializes repository instances and rejects the stale concurrent writer', 
     const final = await initializer.overview()
     assert.equal(final.board.works.length, 2)
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('recovers a repository lock owned by a dead Host process', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-dead-lock-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    await new GitBoardRepository(config).overview()
+    await writeFile(
+      path.join(root, '.git', 'dddrop-kanban.lock'),
+      '2147483647:dead-host\n',
+    )
+    const startedAt = Date.now()
+    const recovered = await new GitBoardRepository(config).overview()
+    assert.equal(recovered.board.works.length, 1)
+    assert.equal(Date.now() - startedAt < 5_000, true)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -465,7 +489,7 @@ test('migrates a legacy combined board into split ticket files once', async () =
         'utf8',
       ),
     )
-    assert.equal(boardDocument.version, 10)
+    assert.equal(boardDocument.version, 11)
     assert.equal(boardDocument.projects, undefined)
     assert.equal(boardDocument.cards, undefined)
     assert.equal(boardDocument.tickets, undefined)
@@ -482,7 +506,7 @@ test('migrates a legacy combined board into split ticket files once', async () =
     assert.equal(ticketDocument.waterLevel, '0')
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'feat(pavo): persist column transition rules',
+      'feat(pavo): persist automatic mode',
     )
     assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '2')
 
@@ -524,10 +548,10 @@ test('migrates an empty version 4 board without a tracked tickets path', async (
     assert.equal(migrated.board.works.length, 0)
     assert.equal(migrated.board.workflows[0].id, ROOT_WORKFLOW_ID)
     const currentDocument = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(currentDocument.version, 10)
+    assert.equal(currentDocument.version, 11)
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'feat(pavo): persist column transition rules',
+      'feat(pavo): persist automatic mode',
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -557,7 +581,7 @@ test('migrates version 5 Work placements into template storage', async () => {
     assert.equal(migrated.board.works.length, initial.board.works.length)
     assert.deepEqual(migrated.board.templates, [])
     const current = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(current.version, 10)
+    assert.equal(current.version, 11)
     assert.deepEqual(current.templates, [])
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -611,7 +635,7 @@ test('migrates legacy Project and Assignee labels without inventing identities',
     })
     const currentBoard = JSON.parse(await readFile(boardPath, 'utf8'))
     const currentTicket = JSON.parse(await readFile(ticketPath, 'utf8'))
-    assert.equal(currentBoard.version, 10)
+    assert.equal(currentBoard.version, 11)
     assert.equal(currentBoard.projects, undefined)
     assert.equal(currentTicket.version, 7)
     assert.equal(currentTicket.project, undefined)
@@ -655,12 +679,12 @@ test('migrates Workspace storage to Agent Session references', async () => {
     assert.equal(migrated.board.works[0].sessionId, '')
     const currentBoard = JSON.parse(await readFile(boardPath, 'utf8'))
     const currentTicket = JSON.parse(await readFile(ticketPath, 'utf8'))
-    assert.equal(currentBoard.version, 10)
+    assert.equal(currentBoard.version, 11)
     assert.equal(currentTicket.version, 7)
     assert.equal(currentTicket.sessionId, '')
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'feat(pavo): persist column transition rules',
+      'feat(pavo): persist automatic mode',
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -696,11 +720,12 @@ test('migrates profile transition rules into board storage', async () => {
       DEFAULT_WORKFLOW,
     )
     const current = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(current.version, 10)
+    assert.equal(current.version, 11)
+    assert.deepEqual(current.autoMode, { enabled: false })
     assert.deepEqual(current.columns[0].allowedTransitions, ['ready'])
     assert.equal(
       await git(root, 'log', '-1', '--format=%s'),
-      'feat(pavo): persist column transition rules',
+      'feat(pavo): persist automatic mode',
     )
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -761,6 +786,35 @@ test('rejects legacy Project fields in current Workspace storage', async () => {
   }
 })
 
+test('persists board automatic mode across repository instances', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-auto-mode-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    const repository = new GitBoardRepository(config)
+    const initial = await repository.overview()
+    const enabled = await repository.mutate({
+      expectedRevision: initial.revision,
+      commitMessage: 'feat(pavo): enable automatic mode',
+      mutation: (board) => setAutoMode(board, { enabled: true }),
+    })
+    assert.deepEqual(enabled.board.autoMode, { enabled: true })
+    const document = JSON.parse(
+      await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
+    )
+    assert.equal(document.version, 11)
+    assert.deepEqual(document.autoMode, { enabled: true })
+    const restarted = await new GitBoardRepository(config).overview()
+    assert.deepEqual(restarted.board.autoMode, { enabled: true })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('persists the shared template library in board storage', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-templates-'))
   try {
@@ -790,7 +844,7 @@ test('persists the shared template library in board storage', async () => {
     const document = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(document.version, 10)
+    assert.equal(document.version, 11)
     assert.equal(document.templates[0].id, 'welcome-template')
     assert.equal(document.templates[0].content.workflowId, undefined)
   } finally {
@@ -835,7 +889,7 @@ test('persists the Session linked by an Agent Work run', async () => {
         'utf8',
       ),
     )
-    assert.equal(boardDocument.version, 10)
+    assert.equal(boardDocument.version, 11)
     assert.equal(ticketDocument.version, 7)
     assert.equal(ticketDocument.sessionId, 'session-persisted-run')
     const reloaded = await new GitBoardRepository({
@@ -894,7 +948,7 @@ test('persists nested Workflows and Work membership in current storage', async (
     const ticketDocument = JSON.parse(
       await readFile(path.join(root, 'kanban', 'tickets', 'release-work.json'), 'utf8'),
     )
-    assert.equal(boardDocument.version, 10)
+    assert.equal(boardDocument.version, 11)
     assert.equal(boardDocument.workflows[0].id, ROOT_WORKFLOW_ID)
     assert.equal(ticketDocument.version, 7)
     assert.equal(ticketDocument.workflowId, 'release')

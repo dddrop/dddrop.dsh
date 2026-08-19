@@ -302,8 +302,8 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 10
-const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7, 8, 9])
+const BOARD_FORMAT_VERSION = 11
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7, 8, 9, 10])
 const TICKET_FORMAT_VERSION = 7
 const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6])
 const MAX_TICKET_ID_LENGTH = 128
@@ -357,6 +357,7 @@ function splitBoardDocuments(boardInput, workflow) {
     board,
     boardDocument: {
       version: BOARD_FORMAT_VERSION,
+      autoMode: board.autoMode,
       columns: board.columns,
       workflows: board.workflows,
       templates: board.templates,
@@ -424,6 +425,22 @@ export class GitBoardRepository {
     return pending
   }
 
+  async removeDeadRepositoryLock() {
+    const ownerToken = await readFile(this.lockPath, 'utf8').catch(() => '')
+    const ownerPid = Number.parseInt(ownerToken.split(':', 1)[0], 10)
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) return false
+    try {
+      process.kill(ownerPid, 0)
+      return false
+    } catch (error) {
+      if (error?.code !== 'ESRCH') return false
+    }
+    const currentToken = await readFile(this.lockPath, 'utf8').catch(() => '')
+    if (currentToken !== ownerToken) return false
+    await rm(this.lockPath, { force: true })
+    return true
+  }
+
   async acquireRepositoryLock() {
     const startedAt = Date.now()
     const token = `${process.pid}:${randomUUID()}`
@@ -443,6 +460,7 @@ export class GitBoardRepository {
         }
       } catch (error) {
         if (error?.code !== 'EEXIST') throw error
+        if (await this.removeDeadRepositoryLock()) continue
 
         try {
           const lockStatus = await stat(this.lockPath)
@@ -785,7 +803,7 @@ export class GitBoardRepository {
         ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
           document.version,
         ) ||
-        ([4, 5, 6, 7, 8, 9, BOARD_FORMAT_VERSION].includes(document.version)
+        ([4, 5, 6, 7, 8, 9, 10, BOARD_FORMAT_VERSION].includes(document.version)
           ? !Array.isArray(document.works)
           : !Array.isArray(document.tickets))
       ) {
@@ -801,13 +819,17 @@ export class GitBoardRepository {
           !Array.isArray(document.columns) ||
           document.columns.some(
             (column) => !Array.isArray(column?.allowedTransitions),
-          ))
+          ) ||
+          document.autoMode === null ||
+          typeof document.autoMode !== 'object' ||
+          Array.isArray(document.autoMode) ||
+          typeof document.autoMode.enabled !== 'boolean')
       ) {
         throw new TypeError(
-          'Current board storage must use DSH Workspace references and define column allowedTransitions.',
+          'Current board storage must use DSH Workspace references, define column allowedTransitions, and define autoMode.',
         )
       }
-      const placements = ([4, 5, 6, 7, 8, 9, BOARD_FORMAT_VERSION].includes(document.version)
+      const placements = ([4, 5, 6, 7, 8, 9, 10, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
         .map((value, index) => {
@@ -963,6 +985,7 @@ export class GitBoardRepository {
       const board = normalizeBoard(
         {
           version: 1,
+          autoMode: document.autoMode,
           columns: document.columns,
           workflows: document.workflows,
           templates: document.templates,
@@ -1237,7 +1260,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'feat(pavo): persist column transition rules',
+      'feat(pavo): persist automatic mode',
       snapshot.board,
     )
     this.cachedSnapshot = migrated

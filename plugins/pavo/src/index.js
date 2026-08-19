@@ -7,9 +7,11 @@ import {
   instantiateTemplate,
   moveWork,
   normalizeAssignee,
+  reconcileAutoMode,
   removeTemplate,
   removeWork,
   removeWorkflow,
+  setAutoMode,
   startWork,
   updateTemplate,
   updateWork,
@@ -495,8 +497,11 @@ async function launchWorkSession(controller, args, services) {
     claimedSnapshot = await controller.mutate({
       expectedRevision: snapshot.revision,
       commitMessage: 'feat(pavo): run work',
-      mutation: (board) =>
-        startWork(
+      mutation: (board) => {
+        if (args.requireAutoMode && !board.autoMode.enabled) {
+          throw new RequestError('Pavo automatic mode was disabled before the Work could start.')
+        }
+        return startWork(
           board,
           {
             workId: work.id,
@@ -504,7 +509,8 @@ async function launchWorkSession(controller, args, services) {
             updatedAt: new Date().toISOString(),
           },
           { workflow: controller.config.columns },
-        ),
+        )
+      },
     })
   } catch (error) {
     const current = await controller.overview().catch(() => undefined)
@@ -537,17 +543,7 @@ async function launchWorkSession(controller, args, services) {
     }
   }
 
-  try {
-    await agent.whenIdle()
-    agent.followup(createRunPrompt(work.description))
-  } catch (error) {
-    throw new RequestError(
-      `Session ${sessionId} was ${reuseSession ? 'reused' : 'created'} and linked, but its Work prompt could not start: ${String(error)}`,
-      500,
-    )
-  }
-
-  return {
+  const result = {
     ...publicSnapshot(claimedSnapshot, controller),
     run: {
       sessionId,
@@ -555,6 +551,299 @@ async function launchWorkSession(controller, args, services) {
       workspaceId: workspace.id,
       agentPresetId: preset.id,
       mode: reuseSession ? 'reused' : 'created',
+    },
+  }
+  const deliverPrompt = async () => {
+    try {
+      await agent.whenIdle()
+      agent.followup(createRunPrompt(work.description))
+    } catch (error) {
+      throw new RequestError(
+        `Session ${sessionId} was ${reuseSession ? 'reused' : 'created'} and linked, but its Work prompt could not start: ${String(error)}`,
+        500,
+      )
+    }
+  }
+  if (args.detachPrompt) {
+    void deliverPrompt().then(args.onPromptSuccess, args.onPromptError)
+    return result
+  }
+  await deliverPrompt()
+  return result
+}
+
+function createRunCoordinator(controller, services) {
+  const operations = new Map()
+
+  function resultFor(record, detached) {
+    if (detached) return record.claim
+    return record.claim.then(async (result) => {
+      await record.prompt
+      return result
+    })
+  }
+
+  return {
+    run(args) {
+      if (typeof args.workId !== 'string' || args.workId.trim().length === 0) {
+        throw new RequestError('Run requires a Work id.')
+      }
+      const workId = args.workId.trim()
+      const existing = operations.get(workId)
+      if (existing) {
+        if (args.expectedRevision !== existing.expectedRevision) {
+          throw new StaleRevisionError()
+        }
+        return resultFor(existing, args.detached === true)
+      }
+
+      let resolvePrompt
+      let rejectPrompt
+      const prompt = new Promise((resolve, reject) => {
+        resolvePrompt = resolve
+        rejectPrompt = reject
+      })
+      void prompt.catch(() => {})
+      const claim = launchWorkSession(
+        controller,
+        {
+          ...args,
+          workId,
+          detachPrompt: true,
+          onPromptSuccess: () => {
+            resolvePrompt()
+            args.onPromptSuccess?.()
+          },
+          onPromptError: (error) => {
+            rejectPrompt(error)
+            args.onPromptError?.(error)
+          },
+        },
+        services,
+      )
+      const record = {
+        expectedRevision: args.expectedRevision,
+        claim,
+        prompt,
+      }
+      operations.set(workId, record)
+      void claim.catch((error) => rejectPrompt(error))
+      void prompt.then(
+        () => operations.delete(workId),
+        () => operations.delete(workId),
+      )
+      return resultFor(record, args.detached === true)
+    },
+  }
+}
+
+function automaticDependenciesAreCurrent(worksById, work) {
+  return Object.entries(work.upstreamWaterLevels).every(
+    ([upstreamId, acknowledgedWaterLevel]) => {
+      const upstream = worksById.get(upstreamId)
+      return (
+        upstream !== undefined &&
+        compareWaterLevels(upstream.waterLevel, acknowledgedWaterLevel) <= 0
+      )
+    },
+  )
+}
+
+function automaticRunFingerprint(work) {
+  return JSON.stringify([
+    work.updatedAt,
+    work.workspaceId,
+    work.assignee.presetId,
+    work.description,
+    work.sessionId,
+  ])
+}
+
+function createAutoModeManager(controller, runCoordinator, initialSnapshot) {
+  const failedRuns = new Map()
+  const retryTimers = new Set()
+  let automaticModeEnabled = initialSnapshot.board.autoMode.enabled
+  let lastError
+  let disposed = false
+  let running = false
+  let drainPromise = Promise.resolve()
+  let rerunRequested = false
+
+  async function reconcile() {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshot = await controller.overview()
+      automaticModeEnabled = snapshot.board.autoMode.enabled
+      if (!automaticModeEnabled) {
+        failedRuns.clear()
+        return snapshot
+      }
+      const next = reconcileAutoMode(snapshot.board, {
+        now: new Date().toISOString(),
+        workflow: controller.config.columns,
+      })
+      const changed = next.works.some((work, index) =>
+        work.columnId !== snapshot.board.works[index]?.columnId,
+      )
+      if (!changed) return snapshot
+      try {
+        return await controller.mutate({
+          expectedRevision: snapshot.revision,
+          commitMessage: 'feat(pavo): reconcile automatic mode',
+          mutation: (board) =>
+            reconcileAutoMode(board, {
+              now: new Date().toISOString(),
+              workflow: controller.config.columns,
+            }),
+        })
+      } catch (error) {
+        if (!(error instanceof StaleRevisionError)) throw error
+      }
+    }
+    return controller.overview()
+  }
+
+  function clearObsoleteFailures(snapshot) {
+    const ready = new Map(
+      snapshot.board.works
+        .filter(
+          (work) =>
+            work.columnId === 'ready' &&
+            work.assignee.kind === 'agent-preset',
+        )
+        .map((work) => [work.id, automaticRunFingerprint(work)]),
+    )
+    for (const [workId, failure] of failedRuns) {
+      if (ready.get(workId) !== failure.fingerprint) failedRuns.delete(workId)
+    }
+  }
+
+  function scheduleRetry(delayMs) {
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer)
+      schedule()
+    }, delayMs)
+    timer.unref?.()
+    retryTimers.add(timer)
+  }
+
+  async function runReadyAgents(snapshot) {
+    let current = snapshot
+    while (!disposed && current.board.autoMode.enabled) {
+      clearObsoleteFailures(current)
+      const now = Date.now()
+      const worksById = new Map(
+        current.board.works.map((work) => [work.id, work]),
+      )
+      const work = current.board.works.find((candidate) => {
+        if (
+          candidate.columnId !== 'ready' ||
+          !candidate.workspaceId ||
+          candidate.assignee.kind !== 'agent-preset' ||
+          !automaticDependenciesAreCurrent(worksById, candidate)
+        ) {
+          return false
+        }
+        const failure = failedRuns.get(candidate.id)
+        return (
+          !failure ||
+          failure.fingerprint !== automaticRunFingerprint(candidate) ||
+          failure.nextAttemptAt <= now
+        )
+      })
+      if (!work) return
+
+      try {
+        await runCoordinator.run({
+          workId: work.id,
+          expectedRevision: current.revision,
+          requireAutoMode: true,
+          detached: true,
+          onPromptSuccess: () => {
+            lastError = undefined
+          },
+          onPromptError: (error) => {
+            lastError = error instanceof Error ? error.message : String(error)
+          },
+        })
+        failedRuns.delete(work.id)
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error)
+        if (!(error instanceof StaleRevisionError)) {
+          const fingerprint = automaticRunFingerprint(work)
+          const previous = failedRuns.get(work.id)
+          const attempts =
+            previous?.fingerprint === fingerprint ? previous.attempts + 1 : 1
+          const retryDelay = Math.min(60_000, 1_000 * 2 ** (attempts - 1))
+          failedRuns.set(work.id, {
+            fingerprint,
+            attempts,
+            nextAttemptAt: Date.now() + retryDelay,
+          })
+          scheduleRetry(retryDelay)
+        }
+      }
+      current = await controller.overview()
+    }
+  }
+
+  async function drain() {
+    if (running || disposed) return
+    running = true
+    try {
+      do {
+        rerunRequested = false
+        try {
+          const snapshot = await reconcile()
+          if (!disposed && snapshot.board.autoMode.enabled) {
+            await runReadyAgents(snapshot)
+          }
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error)
+          // Periodic ticks and future mutations retry transient failures.
+        }
+      } while (rerunRequested && !disposed)
+    } finally {
+      running = false
+      if (rerunRequested && !disposed) startDrain()
+    }
+  }
+
+  function startDrain() {
+    drainPromise = drain()
+    void drainPromise
+  }
+
+  function schedule(force = false) {
+    if (disposed || (!force && !automaticModeEnabled)) return
+    rerunRequested = true
+    if (!running) startDrain()
+  }
+
+  return {
+    observe(snapshot) {
+      if (!snapshot?.board?.autoMode) return
+      automaticModeEnabled = snapshot.board.autoMode.enabled
+      if (automaticModeEnabled) schedule()
+      else {
+        failedRuns.clear()
+        lastError = undefined
+      }
+    },
+    describe() {
+      return {
+        running,
+        retryingWorkCount: failedRuns.size,
+        ...(lastError ? { lastError } : {}),
+      }
+    },
+    schedule,
+    stop() {
+      disposed = true
+      rerunRequested = false
+      failedRuns.clear()
+      for (const timer of retryTimers) clearTimeout(timer)
+      retryTimers.clear()
+      return drainPromise
     },
   }
 }
@@ -619,7 +908,7 @@ function templateContentFromArgs(board, args, kind) {
   throw new TypeError('Template kind must be work or workflow.')
 }
 
-async function dispatch(controller, request, services, runOperations) {
+async function dispatch(controller, request, services, runCoordinator) {
   const body = await readJsonBody(request)
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new RequestError('The request body must be an object.')
@@ -850,31 +1139,22 @@ async function dispatch(controller, request, services, runOperations) {
       throw new RequestError(
         'Pavo Projects were replaced by DSH Workspace references.',
       )
-    case 'runWork': {
-      if (typeof args.workId !== 'string' || args.workId.trim().length === 0) {
-        throw new RequestError('Run requires a Work id.')
-      }
-      const workId = args.workId.trim()
-      const existing = runOperations.get(workId)
-      if (existing) {
-        if (args.expectedRevision !== existing.expectedRevision) {
-          throw new StaleRevisionError()
-        }
-        return existing.operation
-      }
-      const operation = launchWorkSession(
+    case 'runWork':
+      return runCoordinator.run(args)
+    case 'setAutoMode':
+      return publicSnapshot(
+        await controller.mutate({
+          ...mutationOptions,
+          commitMessage: `feat(pavo): ${args.enabled ? 'enable' : 'disable'} automatic mode`,
+          mutation: (board) =>
+            setAutoMode(
+              board,
+              { enabled: args.enabled },
+              { workflow: controller.config.columns },
+            ),
+        }),
         controller,
-        { ...args, workId },
-        services,
-      ).finally(() => {
-        runOperations.delete(workId)
-      })
-      runOperations.set(workId, {
-        expectedRevision: args.expectedRevision,
-        operation,
-      })
-      return operation
-    }
+      )
     case 'move':
     case 'moveWork':
       return publicSnapshot(
@@ -913,8 +1193,13 @@ async function dispatch(controller, request, services, runOperations) {
   }
 }
 
-function createHandler(controller, trustedHosts, services) {
-  const runOperations = new Map()
+function createHandler(
+  controller,
+  trustedHosts,
+  services,
+  runCoordinator,
+  autoModeManager,
+) {
   return async (request, response) => {
     try {
       assertTrustedRequest(request, trustedHosts)
@@ -927,8 +1212,10 @@ function createHandler(controller, trustedHosts, services) {
         controller,
         request,
         services,
-        runOperations,
+        runCoordinator,
       )
+      autoModeManager.observe(value)
+      if (value?.board) value.automationStatus = autoModeManager.describe()
       sendJson(response, 200, { ok: true, value })
     } catch (error) {
       const clientError =
@@ -1200,7 +1487,7 @@ function registerAgentTools(ctx, controller) {
   const listTool = defineTool({
     name: 'pavo_list_works',
     description:
-      'List Pavo Works and the current optimistic revision. Pavo is passive: inspect the Works and decide what, if anything, to execute or change.',
+      'List Pavo Works and the current optimistic revision. When board automatic mode is enabled, Pavo may reconcile eligible statuses and start Ready Agent-assigned Works.',
     parameters: {
       workspaceId: {
         type: 'string',
@@ -1344,7 +1631,7 @@ function registerAgentTools(ctx, controller) {
   const updateTool = defineTool({
     name: 'pavo_update_work',
     description:
-      'Create, edit, move, or delete a Pavo Work using an exact revision. The Agent owns every decision; Pavo does not infer, schedule, retry, increment WaterLevel, or acknowledge upstream versions automatically.',
+      'Create, edit, move, or delete a Pavo Work using an exact revision. When board automatic mode is enabled, the mutation may trigger status reconciliation and Ready Agent execution. Pavo never increments WaterLevels or acknowledges upstream versions automatically.',
     parameters: {
       action: {
         type: 'string',
@@ -1827,7 +2114,7 @@ function registerAgentTools(ctx, controller) {
   const applyTemplateTool = defineTool({
     name: 'pavo_apply_template',
     description:
-      'Instantiate one Pavo template under an explicit target Workflow using fresh IDs. This only creates passive records; it never executes Works, schedules Agents, changes WaterLevels, or acknowledges dependencies.',
+      'Instantiate one Pavo template under an explicit target Workflow using fresh IDs. Automatic mode may subsequently reconcile and run eligible created Works; instantiation itself never changes WaterLevels or acknowledges dependencies.',
     parameters: {
       expectedRevision: { type: 'string', required: true },
       templateId: { type: 'string', required: true },
@@ -1917,12 +2204,46 @@ function registerAgentTools(ctx, controller) {
 export async function apply(ctx, config) {
   const controller = await RepositoryController.create(config)
   const trustedHosts = ctx.get('webRuntime')?.trustedHosts ?? []
-  const handler = createHandler(controller, trustedHosts, {
+  const services = {
     workspaceRegistry: ctx.workspaceRegistry,
     agents: ctx.agents,
     agentPresets: ctx.agentPresets,
     agentDefaultModel: ctx.agentDefaultModel,
     sessionTitle: ctx.sessionTitle,
+  }
+  const runCoordinator = createRunCoordinator(controller, services)
+  const autoModeManager = createAutoModeManager(controller, runCoordinator, {
+    board: { autoMode: { enabled: false } },
+  })
+  const handler = createHandler(
+    controller,
+    trustedHosts,
+    services,
+    runCoordinator,
+    autoModeManager,
+  )
+  ctx.effect(() => {
+    const disposeListener = controller.onMutation((snapshot) => {
+      if (snapshot?.board) autoModeManager.observe(snapshot)
+      else autoModeManager.schedule(true)
+    })
+    const timer = setInterval(
+      () => autoModeManager.schedule(),
+      Math.max(1_000, controller.config.pollIntervalMs),
+    )
+    const observationTimer = setInterval(
+      () => autoModeManager.schedule(true),
+      60_000,
+    )
+    timer.unref?.()
+    observationTimer.unref?.()
+    autoModeManager.schedule(true)
+    return () => {
+      clearInterval(timer)
+      clearInterval(observationTimer)
+      disposeListener()
+      return autoModeManager.stop()
+    }
   })
 
   for (const path of [API_PATH, LEGACY_API_PATH]) {

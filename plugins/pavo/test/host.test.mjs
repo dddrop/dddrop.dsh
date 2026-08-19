@@ -15,6 +15,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import { promisify } from 'node:util'
 
+import { GitBoardRepository } from '../src/git-store.js'
 import { apply } from '../src/index.js'
 
 const execFileAsync = promisify(execFile)
@@ -115,7 +116,9 @@ function createContext(
       },
     },
     effect(setup) {
-      return setup()
+      const dispose = setup()
+      if (typeof dispose === 'function') runServices.disposers?.push(dispose)
+      return dispose
     },
   }
 }
@@ -268,7 +271,8 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.version, 10)
+    assert.equal(board.version, 11)
+    assert.deepEqual(board.autoMode, { enabled: false })
     assert.deepEqual(board.columns[0].allowedTransitions, ['ready'])
     assert.equal(board.projects, undefined)
     assert.equal(board.cards, undefined)
@@ -928,6 +932,194 @@ test('runs a Ready Agent-assigned Work in its DSH Workspace', async () => {
   }
 })
 
+test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-auto-run-'))
+  const routes = []
+  const disposers = []
+  let createCount = 0
+  const promptedMessages = []
+  let releaseFirstIdle
+  const firstIdle = new Promise((resolve) => {
+    releaseFirstIdle = resolve
+  })
+  let resolveSecondCreated
+  const secondCreated = new Promise((resolve) => {
+    resolveSecondCreated = resolve
+  })
+  let resolvePrompted
+  const prompted = new Promise((resolve) => {
+    resolvePrompted = resolve
+  })
+  const workspace = {
+    id: 'workspace-auto',
+    title: 'Automatic Workspace',
+    path: root,
+    sessionIds: [],
+    async status() {
+      return 'ok'
+    },
+    async attachSession() {},
+    async detachSession() {},
+  }
+  const workspaceRegistry = {
+    list: () => [workspace],
+    get: (id) => (id === workspace.id ? workspace : undefined),
+    async archiveSession() {},
+  }
+  const agentPresets = {
+    async list() {
+      return []
+    },
+    async resolve(id) {
+      return { id, name: id }
+    },
+    async mount() {},
+  }
+  const agents = {
+    async create(options) {
+      createCount += 1
+      const ordinal = createCount
+      if (ordinal === 2) resolveSecondCreated()
+      const agent = {
+        id: options.sessionId,
+        session: {
+          id: options.sessionId,
+          events: [],
+          header: {
+            cwd: options.meta.cwd,
+            agentPreset: options.meta.agentPreset,
+          },
+        },
+        async whenIdle() {
+          if (ordinal === 1) await firstIdle
+        },
+        followup(message) {
+          promptedMessages.push(message)
+          if (promptedMessages.length === 2) resolvePrompted()
+        },
+      }
+      await options.setup({
+        agent,
+        on() {
+          return () => {}
+        },
+      })
+      return { agent, async dispose() {} }
+    },
+    get() {
+      return undefined
+    },
+    async resume() {
+      throw new Error('resume is not expected')
+    },
+  }
+
+  try {
+    await apply(
+      createContext(
+        (registered) => routes.push(registered),
+        undefined,
+        agentPresets,
+        workspaceRegistry,
+        {
+          agents,
+          agentDefaultModel: {
+            currentSelection: () => ({
+              provider: 'test-provider',
+              model: 'test-model',
+            }),
+          },
+          sessionTitle: { rename() {} },
+          disposers,
+        },
+      ),
+      {
+        repositoryPath: root,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath: path.join(root, '.pavo-settings.json'),
+        pollIntervalMs: 60_000,
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const initial = await call(route, 'overview')
+    const workId = initial.payload.value.board.works[0].id
+    const configured = await call(route, 'updateWork', {
+      workId,
+      workspaceId: workspace.id,
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+      description: 'Run automatically from Pavo.',
+      expectedRevision: initial.payload.value.revision,
+    })
+    const added = await call(route, 'addWork', {
+      type: 'goal',
+      workspaceId: workspace.id,
+      title: 'Run a second Work automatically',
+      description: 'Run second automatically from Pavo.',
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+      waterLevel: '0',
+      upstreamWaterLevels: {},
+      workflowId: 'root',
+      columnId: 'backlog',
+      expectedRevision: configured.payload.value.revision,
+    })
+    const secondWorkId = added.payload.value.board.works.find(
+      (work) => work.title === 'Run a second Work automatically',
+    ).id
+    const enabled = await call(route, 'setAutoMode', {
+      enabled: true,
+      expectedRevision: added.payload.value.revision,
+    })
+    assert.equal(enabled.response.status, 200, enabled.response.body)
+    assert.deepEqual(enabled.payload.value.board.autoMode, { enabled: true })
+
+    let timeout
+    try {
+      await Promise.race([
+        secondCreated,
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Second automatic Agent claim timed out.')),
+            5_000,
+          )
+        }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+    }
+    assert.equal(createCount, 2)
+    releaseFirstIdle()
+    try {
+      await Promise.race([
+        prompted,
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Automatic Agent prompts timed out.')),
+            5_000,
+          )
+        }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+    }
+    const current = await call(route, 'overview')
+    const running = current.payload.value.board.works.filter(
+      (work) => work.id === workId || work.id === secondWorkId,
+    )
+    assert.equal(running.length, 2)
+    assert.equal(running.every((work) => work.columnId === 'in-progress'), true)
+    assert.equal(running.every((work) => work.sessionId !== ''), true)
+    assert.deepEqual(
+      promptedMessages.map((message) => message.content[0].text).sort(),
+      ['Run automatically from Pavo.', 'Run second automatically from Pavo.'].sort(),
+    )
+  } finally {
+    for (const dispose of disposers.reverse()) await dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('registers passive Agent tools for reading and updating Works', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-tools-'))
   const routes = []
@@ -1201,16 +1393,57 @@ test('persists repository settings and restores the active checkout', async () =
   }
 })
 
+test('does not block Host startup on an active repository lock', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-startup-lock-'))
+  const disposers = []
+  const config = {
+    repositoryPath: root,
+    autoPull: false,
+    autoPush: false,
+    initializeRepository: true,
+    settingsPath: path.join(root, '.pavo-settings.json'),
+  }
+  try {
+    await new GitBoardRepository(config).overview()
+    const lockPath = path.join(root, '.git', 'dddrop-kanban.lock')
+    await writeFile(lockPath, `${process.pid}:active-test-lock\n`)
+    const startedAt = Date.now()
+    await apply(
+      createContext(
+        () => {},
+        undefined,
+        undefined,
+        undefined,
+        { disposers },
+      ),
+      config,
+    )
+    const startupDuration = Date.now() - startedAt
+    await rm(lockPath, { force: true })
+    assert.equal(startupDuration < 1_000, true)
+  } finally {
+    for (const dispose of disposers.reverse()) await dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('falls back to profile defaults when stored settings are invalid', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-invalid-settings-'))
   const repositoryPath = path.join(root, 'repository')
   const settingsPath = path.join(root, 'repository.json')
   const routes = []
+  const disposers = []
 
   try {
     await writeFile(settingsPath, '{invalid json\n')
     await apply(
-      createContext((registered) => routes.push(registered)),
+      createContext(
+        (registered) => routes.push(registered),
+        undefined,
+        undefined,
+        undefined,
+        { disposers },
+      ),
       {
         repositoryPath,
         autoPull: false,
@@ -1225,6 +1458,7 @@ test('falls back to profile defaults when stored settings are invalid', async ()
     assert.equal(settings.payload.value.repository.repositoryPath, repositoryPath)
     assert.match(settings.payload.value.settingsWarning, /profile defaults/)
   } finally {
+    for (const dispose of disposers.reverse()) await dispose()
     await rm(root, { recursive: true, force: true })
   }
 })

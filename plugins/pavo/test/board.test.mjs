@@ -15,9 +15,11 @@ import {
   normalizeBoard,
   normalizeWorkflow,
   normalizeWorkspaceReference,
+  reconcileAutoMode,
   removeTemplate,
   removeWork,
   removeWorkflow,
+  setAutoMode,
   startWork,
   updateTemplate,
   updateWork,
@@ -641,6 +643,149 @@ test('compares arbitrary-precision WaterLevels without floating point', () => {
   assert.equal(compareWaterLevels('1.2300', '1.23'), 0)
   assert.equal(compareWaterLevels('0.0000000000000000001', '0.0000000000000000002'), -1)
   assert.throws(() => compareWaterLevels('1e3', '1000'), /without an exponent/)
+})
+
+test('reconciles eligible and stale Works when automatic mode is enabled', () => {
+  const initial = createBoard()
+  assert.deepEqual(initial.autoMode, { enabled: false })
+  const enabled = setAutoMode(initial, { enabled: true })
+  assert.deepEqual(initial.autoMode, { enabled: false })
+  assert.deepEqual(enabled.autoMode, { enabled: true })
+
+  let board = addWork(
+    enabled,
+    workInput({
+      id: 'upstream',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'human' },
+      waterLevel: '5',
+      columnId: 'done',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'eligible-human',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'human' },
+      upstreamWaterLevels: { upstream: '5' },
+      columnId: 'backlog',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'missing-workspace',
+      workspaceId: '',
+      assignee: { kind: 'human' },
+      columnId: 'backlog',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'unassigned',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'unassigned' },
+      columnId: 'backlog',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'stale-backlog',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+      upstreamWaterLevels: { upstream: '4' },
+      columnId: 'backlog',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'stale-ongoing',
+      type: 'ongoing',
+      workspaceId: 'workspace-harness',
+      sessionId: 'session-ongoing',
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+      waterLevel: '12',
+      upstreamWaterLevels: { upstream: '4' },
+      columnId: 'done',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'stale-goal',
+      type: 'goal',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'human' },
+      upstreamWaterLevels: { upstream: '4' },
+      columnId: 'done',
+    }),
+  )
+
+  const reconciled = reconcileAutoMode(board, {
+    now: '2026-01-03T00:00:00.000Z',
+  })
+  const columns = Object.fromEntries(
+    reconciled.works.map((work) => [work.id, work.columnId]),
+  )
+  assert.equal(columns['eligible-human'], 'ready')
+  assert.equal(columns['missing-workspace'], 'backlog')
+  assert.equal(columns.unassigned, 'backlog')
+  assert.equal(columns['stale-backlog'], 'backlog')
+  assert.equal(columns['stale-ongoing'], 'backlog')
+  assert.equal(columns['stale-goal'], 'done')
+  const ongoing = reconciled.works.find((work) => work.id === 'stale-ongoing')
+  assert.equal(ongoing.sessionId, 'session-ongoing')
+  assert.equal(ongoing.waterLevel, '12')
+  assert.equal(ongoing.updatedAt, '2026-01-03T00:00:00.000Z')
+
+  const rollback = updateWork(
+    board,
+    {
+      workId: 'upstream',
+      ...board.works.find((work) => work.id === 'upstream'),
+      waterLevel: '3',
+    },
+  )
+  assert.equal(
+    reconcileAutoMode(rollback).works.find(
+      (work) => work.id === 'stale-backlog',
+    ).columnId,
+    'ready',
+  )
+})
+
+test('skips automatic moves forbidden by column transition rules', () => {
+  const workflow = DEFAULT_WORKFLOW.map((column) => ({
+    ...column,
+    allowedTransitions:
+      column.id === 'done' ? ['review'] : [...column.allowedTransitions],
+  }))
+  let board = createDefaultBoard({ id: 'upstream', workflow })
+  board = updateWork(board, {
+    workId: 'upstream',
+    ...board.works[0],
+    waterLevel: '2',
+  })
+  board = addWork(
+    board,
+    workInput({
+      id: 'ongoing',
+      type: 'ongoing',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'human' },
+      upstreamWaterLevels: { upstream: '1' },
+      columnId: 'done',
+    }),
+  )
+  board = setAutoMode(board, { enabled: true })
+  assert.equal(
+    reconcileAutoMode(board).works.find((work) => work.id === 'ongoing').columnId,
+    'done',
+  )
 })
 
 test('starts only Ready Works and records their Agent Session', () => {

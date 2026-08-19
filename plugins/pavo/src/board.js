@@ -22,7 +22,7 @@ export const DEFAULT_WORKFLOW = Object.freeze([
   Object.freeze({
     id: 'done',
     title: 'Done',
-    allowedTransitions: Object.freeze(['review']),
+    allowedTransitions: Object.freeze(['review', 'backlog']),
   }),
 ])
 
@@ -157,6 +157,15 @@ function normalizeTimestamp(value, fallback = new Date(0).toISOString()) {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value))
     ? value
     : fallback
+}
+
+function normalizeAutoMode(value) {
+  if (value === undefined) return { enabled: false }
+  const autoMode = requireObject(value, 'Board autoMode must be an object.')
+  if (typeof autoMode.enabled !== 'boolean') {
+    throw new TypeError('Board autoMode enabled must be a boolean.')
+  }
+  return { enabled: autoMode.enabled }
 }
 
 function cloneColumn(column, order) {
@@ -635,6 +644,7 @@ export function createDefaultBoard({
 
   return {
     version: 1,
+    autoMode: { enabled: false },
     columns: columns.map((column, order) => cloneColumn(column, order)),
     workflows: [rootWorkflow(createdAt)],
     templates: [],
@@ -743,6 +753,7 @@ export function normalizeBoard(input, { workflow } = {}) {
   const templates = normalizeTemplates(board.templates, sortedColumns)
   return {
     version: 1,
+    autoMode: normalizeAutoMode(board.autoMode),
     columns: sortedColumns,
     workflows,
     templates,
@@ -1188,6 +1199,66 @@ export function removeWorkflow(boardInput, input, { workflow } = {}) {
     throw new TypeError(`Workflow ${workflowId} still contains Works.`)
   }
   board.workflows = board.workflows.filter((item) => item.id !== workflowId)
+  return board
+}
+
+function dependenciesAreCurrent(worksById, work) {
+  return Object.entries(work.upstreamWaterLevels).every(
+    ([upstreamId, acknowledgedWaterLevel]) => {
+      const upstream = worksById.get(upstreamId)
+      return (
+        upstream !== undefined &&
+        compareWaterLevels(upstream.waterLevel, acknowledgedWaterLevel) <= 0
+      )
+    },
+  )
+}
+
+function transitionIsAllowed(board, sourceId, targetId) {
+  return Boolean(
+    board.columns
+      .find((column) => column.id === sourceId)
+      ?.allowedTransitions.includes(targetId),
+  )
+}
+
+export function setAutoMode(boardInput, input, { workflow } = {}) {
+  const board = normalizeBoard(boardInput, { workflow })
+  if (typeof input?.enabled !== 'boolean') {
+    throw new TypeError('Board autoMode enabled must be a boolean.')
+  }
+  board.autoMode = { enabled: input.enabled }
+  return board
+}
+
+export function reconcileAutoMode(boardInput, { now, workflow } = {}) {
+  const board = normalizeBoard(boardInput, { workflow })
+  if (!board.autoMode.enabled) return board
+  const updatedAt = normalizeTimestamp(now, new Date().toISOString())
+  const worksById = new Map(board.works.map((work) => [work.id, work]))
+
+  board.works = board.works.map((work) => {
+    const dependenciesCurrent = dependenciesAreCurrent(worksById, work)
+    const assigned =
+      work.assignee.kind === 'human' || work.assignee.kind === 'agent-preset'
+    const ready =
+      work.columnId === 'backlog' &&
+      Boolean(work.workspaceId) &&
+      assigned &&
+      dependenciesCurrent &&
+      transitionIsAllowed(board, 'backlog', 'ready')
+    const staleOngoing =
+      work.columnId === 'done' &&
+      work.type === 'ongoing' &&
+      !dependenciesCurrent &&
+      transitionIsAllowed(board, 'done', 'backlog')
+    if (!ready && !staleOngoing) return work
+    return {
+      ...work,
+      columnId: ready ? 'ready' : 'backlog',
+      updatedAt,
+    }
+  })
   return board
 }
 

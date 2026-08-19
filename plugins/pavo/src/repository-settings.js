@@ -167,6 +167,7 @@ export class RepositoryController {
     this.repository = new GitBoardRepository(active)
     this.settingsWarning = warning
     this.operationQueue = Promise.resolve()
+    this.mutationListeners = new Set()
   }
 
   get config() {
@@ -185,10 +186,29 @@ export class RepositoryController {
     return this.repository.overview()
   }
 
+  onMutation(listener) {
+    if (typeof listener !== 'function') {
+      throw new TypeError('The repository mutation listener must be a function.')
+    }
+    this.mutationListeners.add(listener)
+    return () => this.mutationListeners.delete(listener)
+  }
+
+  notifyMutation(snapshot) {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener(snapshot)
+      } catch {
+        // Mutation listeners are notifications and must not fail persisted work.
+      }
+    }
+  }
+
   mutate(options) {
     const execute = () => this.repository.mutate(options)
     const pending = this.operationQueue.then(execute, execute)
     this.operationQueue = pending.catch(() => {})
+    void pending.then((snapshot) => this.notifyMutation(snapshot), () => {})
     return pending
   }
 
@@ -221,6 +241,7 @@ export class RepositoryController {
     }
     const pending = this.operationQueue.then(execute, execute)
     this.operationQueue = pending.catch(() => {})
+    void pending.then((snapshot) => this.notifyMutation(snapshot), () => {})
     return pending
   }
 }
