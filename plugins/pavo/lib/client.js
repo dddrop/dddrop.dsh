@@ -92,7 +92,7 @@ window.__ModuleLoader__.load({
     '.pavo-work-open:focus-visible{outline:2px solid rgba(80,120,255,.75);outline-offset:2px;border-radius:8px}',
     '.pavo-work-copy{display:grid;gap:7px;min-width:0}',
     '.pavo-work-kicker{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.62}',
-    '.pavo-work-project{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.pavo-work-workspace{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.pavo-work-key{border:1px solid rgba(128,128,128,.25);border-radius:5px;padding:1px 4px}',
     '.pavo-work-title{font-weight:620;line-height:1.4;overflow-wrap:anywhere}',
     '.pavo-work-body{margin:0;max-height:120px;overflow:hidden;white-space:pre-wrap;font:inherit;font-size:12px;line-height:1.45;opacity:.76}',
@@ -227,10 +227,10 @@ window.__ModuleLoader__.load({
     '.pavo-settings-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}',
     '.pavo-settings-saved{font-size:12px;color:#438a61}',
     '.pavo-settings-warning{border:1px solid rgba(210,145,45,.35);border-radius:9px;padding:10px 11px;font-size:12px;line-height:1.45;color:#b47b28}',
-    '.pavo-project-add{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}',
-    '.pavo-project-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}',
-    '.pavo-project-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid rgba(128,128,128,.25);border-radius:9px;padding:9px 10px}',
-    '.pavo-project-empty{border:1px dashed rgba(128,128,128,.3);border-radius:9px;padding:16px;font-size:13px;opacity:.62}',
+    '.pavo-workspace-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}',
+    '.pavo-workspace-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid rgba(128,128,128,.25);border-radius:9px;padding:9px 10px}',
+    '.pavo-workspace-row small{opacity:.62}',
+    '.pavo-workspace-empty{border:1px dashed rgba(128,128,128,.3);border-radius:9px;padding:16px;font-size:13px;opacity:.62}',
     '.pavo-snackbar{position:fixed;right:22px;bottom:22px;z-index:1000;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:10px;width:min(380px,calc(100vw - 32px));box-sizing:border-box;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(30,30,32,.96);box-shadow:0 14px 38px rgba(0,0,0,.28);padding:12px 13px;color:#fff;animation:pavo-snackbar-in .18s ease-out}',
     '.pavo-snackbar-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#d85c5c;color:#fff;font-size:12px;font-weight:750}',
     '.pavo-snackbar-copy{display:grid;gap:2px;min-width:0}',
@@ -283,10 +283,10 @@ window.__ModuleLoader__.load({
     return comparison > 0 ? 'changed' : comparison < 0 ? 'rollback' : 'synchronized'
   }
 
-  function emptyDraft(project = '', workflowId = ROOT_WORKFLOW_ID) {
+  function emptyDraft(workspaceId = '', workflowId = ROOT_WORKFLOW_ID) {
     return {
       type: 'goal',
-      project,
+      workspaceId,
       workflowId,
       key: '',
       title: '',
@@ -312,7 +312,8 @@ window.__ModuleLoader__.load({
     if (!work) return false
     const fields = [
       'type',
-      'project',
+      'workspaceId',
+      'legacyWorkspaceTitle',
       'workflowId',
       'key',
       'title',
@@ -338,20 +339,96 @@ window.__ModuleLoader__.load({
     )
   }
 
-  function projectOptions(projects) {
+  const LEGACY_WORKSPACE_VALUE = '__pavo_legacy_workspace__'
+
+  function workspaceRosterLabel(workspace, workspaces) {
+    const duplicateTitle = workspaces.some(
+      (candidate) =>
+        candidate.id !== workspace.id && candidate.title === workspace.title,
+    )
+    return `${workspace.title}${duplicateTitle ? ` · ${workspace.id}` : ''}${workspace.unavailable ? ' · unavailable' : ''}`
+  }
+
+  function workspaceLabel(work, workspaces) {
+    if (work?.workspaceId) {
+      const workspace = workspaces.find(
+        (candidate) => candidate.id === work.workspaceId,
+      )
+      if (!workspace) return `Unavailable Workspace · ${work.workspaceId}`
+      return workspaceRosterLabel(workspace, workspaces)
+    }
+    if (work?.legacyWorkspaceTitle) {
+      return `Unassigned · previous Project: ${work.legacyWorkspaceTitle}`
+    }
+    return 'No Workspace'
+  }
+
+  function workspaceOptions(workspaces, current) {
     const nodes = [
-      React.createElement(
-        'option',
-        { key: '', value: '' },
-        'No project',
-      ),
+      React.createElement('option', { key: '', value: '' }, 'No Workspace'),
     ]
-    for (const project of projects) {
+    if (!current?.workspaceId && current?.legacyWorkspaceTitle) {
       nodes.push(
-        React.createElement('option', { key: project, value: project }, project),
+        React.createElement(
+          'option',
+          { key: LEGACY_WORKSPACE_VALUE, value: LEGACY_WORKSPACE_VALUE },
+          `Unassigned · previous Project: ${current.legacyWorkspaceTitle}`,
+        ),
+      )
+    }
+    if (
+      current?.workspaceId &&
+      !workspaces.some((workspace) => workspace.id === current.workspaceId)
+    ) {
+      nodes.push(
+        React.createElement(
+          'option',
+          { key: `missing:${current.workspaceId}`, value: current.workspaceId },
+          `Unavailable Workspace · ${current.workspaceId}`,
+        ),
+      )
+    }
+    for (const workspace of workspaces) {
+      nodes.push(
+        React.createElement(
+          'option',
+          {
+            key: workspace.id,
+            value: workspace.id,
+            disabled:
+              Boolean(workspace.unavailable) &&
+              workspace.id !== current?.workspaceId,
+          },
+          workspaceRosterLabel(workspace, workspaces),
+        ),
       )
     }
     return nodes
+  }
+
+  function workspaceControl({ work, workspaces, busy, onChange }) {
+    const value = work?.workspaceId
+      ? work.workspaceId
+      : work?.legacyWorkspaceTitle
+        ? LEGACY_WORKSPACE_VALUE
+        : ''
+    return React.createElement(
+      'select',
+      {
+        className: 'pavo-select',
+        value,
+        disabled: busy,
+        'data-testid': 'pavo-workspace-select',
+        onChange: (event) => {
+          if (event.target.value === LEGACY_WORKSPACE_VALUE) return
+          onChange({
+            workspaceId: event.target.value,
+            legacyWorkspaceTitle: undefined,
+          })
+        },
+      },
+      workspaceOptions(workspaces, work),
+    )
   }
 
   function assigneeValue(assignee) {
@@ -472,7 +549,7 @@ window.__ModuleLoader__.load({
   function editFieldControls({
     draft,
     setDraft,
-    projects,
+    workspaces,
     workflows,
     agentPresets,
     busy,
@@ -496,17 +573,14 @@ window.__ModuleLoader__.load({
         ),
       ),
       field(
-        'Project',
-        React.createElement(
-          'select',
-          {
-            className: 'pavo-select',
-            value: draft.project,
-            disabled: busy,
-            onChange: update('project'),
-          },
-          projectOptions(projects),
-        ),
+        'Workspace',
+        workspaceControl({
+          work: draft,
+          workspaces,
+          busy,
+          onChange: (workspace) =>
+            setDraft((current) => ({ ...current, ...workspace })),
+        }),
       ),
       field(
         'Workflow',
@@ -667,7 +741,7 @@ window.__ModuleLoader__.load({
     work,
     works,
     columns,
-    projects,
+    workspaces,
     workflows,
     agentPresets,
     draft,
@@ -694,7 +768,7 @@ window.__ModuleLoader__.load({
     const heading = creating ? 'Create Work' : draft.title || 'Work details'
     const eyebrow = creating
       ? 'New Work'
-      : [draft.key || 'NO KEY', draft.project || 'No project'].join(' · ')
+      : [draft.key || 'NO KEY', workspaceLabel(draft, workspaces)].join(' · ')
 
     return React.createElement(
       'div',
@@ -753,7 +827,7 @@ window.__ModuleLoader__.load({
             ...editFieldControls({
               draft,
               setDraft,
-              projects,
+              workspaces,
               workflows,
               agentPresets,
               busy,
@@ -1037,7 +1111,7 @@ window.__ModuleLoader__.load({
   function WorkflowTemplateEditor({
     draft,
     setDraft,
-    projects,
+    workspaces,
     columns,
     agentPresets,
     busy,
@@ -1100,7 +1174,7 @@ window.__ModuleLoader__.load({
           {
             id,
             type: 'goal',
-            project: '',
+            workspaceId: '',
             key: '',
             title: 'New Work',
             description: '',
@@ -1259,14 +1333,20 @@ window.__ModuleLoader__.load({
                       React.createElement('option', { key: candidate.id, value: candidate.id }, candidate.title),
                     ),
                   )),
-                  field('Project', React.createElement(
-                    'select',
-                    {
-                      className: 'pavo-select', value: work.project, disabled: busy,
-                      onChange: (event) => updateTemplateWork(work.id, 'project', event.target.value),
-                    },
-                    projectOptions(projects),
-                  )),
+                  field('Workspace', workspaceControl({
+                    work,
+                    workspaces,
+                    busy,
+                    onChange: (workspace) =>
+                      setContent((current) => ({
+                        ...current,
+                        works: current.works.map((candidate) =>
+                          candidate.id === work.id
+                            ? { ...candidate, ...workspace }
+                            : candidate,
+                        ),
+                      })),
+                  })),
                   field('KEY', React.createElement('input', {
                     className: 'pavo-input', value: work.key, disabled: busy, maxLength: 128,
                     onChange: (event) => updateTemplateWork(work.id, 'key', event.target.value),
@@ -1341,7 +1421,7 @@ window.__ModuleLoader__.load({
   function TemplateLibraryDrawer({
     mode,
     templates,
-    projects,
+    workspaces,
     columns,
     workflows,
     agentPresets,
@@ -1597,17 +1677,17 @@ window.__ModuleLoader__.load({
                           ),
                         ),
                         field(
-                          'Project',
-                          React.createElement(
-                            'select',
-                            {
-                              className: 'pavo-select',
-                              value: draft.project,
-                              disabled: busy,
-                              onChange: update('project'),
-                            },
-                            projectOptions(projects),
-                          ),
+                          'Workspace',
+                          workspaceControl({
+                            work: draft,
+                            workspaces,
+                            busy,
+                            onChange: (workspace) =>
+                              setDraft((current) => ({
+                                ...current,
+                                ...workspace,
+                              })),
+                          }),
                         ),
                         field('KEY', React.createElement('input', {
                           className: 'pavo-input', value: draft.key, disabled: busy,
@@ -1651,7 +1731,7 @@ window.__ModuleLoader__.load({
                     ? React.createElement(WorkflowTemplateEditor, {
                         draft,
                         setDraft,
-                        projects,
+                        workspaces,
                         columns,
                         agentPresets,
                         busy,
@@ -2011,6 +2091,7 @@ window.__ModuleLoader__.load({
     onSaveWorkflowTemplate,
     onUpdateDependencies,
     agentPresets,
+    workspaces,
     busy,
     layoutKey,
   }) {
@@ -2251,7 +2332,7 @@ window.__ModuleLoader__.load({
                   React.createElement(
                     'span',
                     null,
-                    `${selected.key || 'NO KEY'} · ${assigneeLabel(selected.assignee, agentPresets)} · WaterLevel ${selected.waterLevel}`,
+                    `${selected.key || 'NO KEY'} · ${workspaceLabel(selected, workspaces)} · ${assigneeLabel(selected.assignee, agentPresets)} · WaterLevel ${selected.waterLevel}`,
                   ),
                 ),
                 React.createElement(
@@ -2452,6 +2533,7 @@ window.__ModuleLoader__.load({
   function Board() {
     const [snapshot, setSnapshot] = React.useState(null)
     const [agentPresets, setAgentPresets] = React.useState([])
+    const [dshWorkspaces, setDshWorkspaces] = React.useState([])
     const [error, setError] = React.useState(null)
     const [busy, setBusy] = React.useState(false)
     const [drawerMode, setDrawerMode] = React.useState('')
@@ -2496,14 +2578,18 @@ window.__ModuleLoader__.load({
         if (background) pollInFlight.current = true
         const sequence = ++requestSequence.current
         try {
-          const [next, presetResult] = await Promise.all([
+          const [next, presetResult, workspaceResult] = await Promise.all([
             request('overview', {}),
-            request('agentPresets', {}).catch(() => ({ presets: [] })),
+            request('agentPresets', {}).catch(() => null),
+            request('workspaces', {}).catch(() => null),
           ])
           if (sequence === requestSequence.current) {
-            setAgentPresets(
-              Array.isArray(presetResult.presets) ? presetResult.presets : [],
-            )
+            if (Array.isArray(presetResult?.presets)) {
+              setAgentPresets(presetResult.presets)
+            }
+            if (Array.isArray(workspaceResult?.workspaces)) {
+              setDshWorkspaces(workspaceResult.workspaces)
+            }
             applySnapshot(next)
           }
         } catch (nextError) {
@@ -2700,7 +2786,10 @@ window.__ModuleLoader__.load({
       setDrawerRevision(snapshot?.revision || '')
       setDrawerDraft({
         type: work.type,
-        project: work.project,
+        workspaceId: work.workspaceId,
+        ...(work.legacyWorkspaceTitle
+          ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
+          : {}),
         workflowId: work.workflowId,
         key: work.key,
         title: work.title,
@@ -2815,7 +2904,7 @@ window.__ModuleLoader__.load({
               kind: 'work',
               name: '',
               type: 'goal',
-              project: '',
+              workspaceId: '',
               key: '',
               title: '',
               description: '',
@@ -2897,7 +2986,10 @@ window.__ModuleLoader__.load({
       if (templateDraft.kind === 'work') {
         return {
           type: templateDraft.type,
-          project: templateDraft.project,
+          workspaceId: templateDraft.workspaceId,
+          ...(templateDraft.legacyWorkspaceTitle
+            ? { legacyWorkspaceTitle: templateDraft.legacyWorkspaceTitle }
+            : {}),
           key: templateDraft.key.trim(),
           title: templateDraft.title.trim(),
           description: templateDraft.description,
@@ -2974,7 +3066,10 @@ window.__ModuleLoader__.load({
       if (!snapshot || !isValidDraft(drawerDraft)) return
       const values = {
         type: drawerDraft.type,
-        project: drawerDraft.project,
+        workspaceId: drawerDraft.workspaceId,
+        ...(drawerDraft.legacyWorkspaceTitle
+          ? { legacyWorkspaceTitle: drawerDraft.legacyWorkspaceTitle }
+          : {}),
         workflowId: drawerDraft.workflowId,
         key: drawerDraft.key.trim(),
         title: drawerDraft.title.trim(),
@@ -3051,7 +3146,10 @@ window.__ModuleLoader__.load({
       const values = {
         workId: drawerWorkId,
         type: drawerDraft.type,
-        project: drawerDraft.project,
+        workspaceId: drawerDraft.workspaceId,
+        ...(drawerDraft.legacyWorkspaceTitle
+          ? { legacyWorkspaceTitle: drawerDraft.legacyWorkspaceTitle }
+          : {}),
         workflowId: drawerDraft.workflowId,
         key: drawerDraft.key.trim(),
         title: drawerDraft.title.trim(),
@@ -3148,8 +3246,8 @@ window.__ModuleLoader__.load({
                 ),
                 React.createElement(
                   'span',
-                  { className: 'pavo-work-project' },
-                  card.project || 'No project',
+                  { className: 'pavo-work-workspace' },
+                  workspaceLabel(card, dshWorkspaces),
                 ),
               ),
               React.createElement('div', { className: 'pavo-work-title' }, card.title),
@@ -3336,6 +3434,7 @@ window.__ModuleLoader__.load({
                 openCaptureTemplate('workflow', workflow),
               onUpdateDependencies: updateDependencies,
               agentPresets,
+              workspaces: dshWorkspaces,
               busy,
             }),
           )
@@ -3345,7 +3444,7 @@ window.__ModuleLoader__.load({
         work: data.works.find((work) => work.id === drawerWorkId),
         works: data.works,
         columns: data.columns,
-        projects: data.projects,
+        workspaces: dshWorkspaces,
         workflows: data.workflows,
         agentPresets,
         draft: drawerDraft,
@@ -3383,7 +3482,7 @@ window.__ModuleLoader__.load({
       React.createElement(TemplateLibraryDrawer, {
         mode: templateDrawerMode,
         templates: data.templates,
-        projects: data.projects,
+        workspaces: dshWorkspaces,
         columns: data.columns,
         workflows: data.workflows,
         agentPresets,
@@ -3445,10 +3544,9 @@ window.__ModuleLoader__.load({
   }
 
   function PavoSettings() {
-    const [snapshot, setSnapshot] = React.useState(null)
     const [repositoryInfo, setRepositoryInfo] = React.useState(null)
     const [repositoryDraft, setRepositoryDraft] = React.useState(null)
-    const [project, setProject] = React.useState('')
+    const [dshWorkspaces, setDshWorkspaces] = React.useState([])
     const [busy, setBusy] = React.useState(false)
     const [error, setError] = React.useState(null)
     const [saved, setSaved] = React.useState(false)
@@ -3460,15 +3558,17 @@ window.__ModuleLoader__.load({
 
     const load = React.useCallback(async () => {
       try {
-        const info = await request('repositorySettings', {})
+        const [info, workspaceResult] = await Promise.all([
+          request('repositorySettings', {}),
+          request('workspaces', {}),
+        ])
         applyRepositoryInfo(info)
-        try {
-          setSnapshot(await request('overview', {}))
-          setError(null)
-        } catch (nextError) {
-          setSnapshot(null)
-          setError(nextError instanceof Error ? nextError.message : String(nextError))
-        }
+        setDshWorkspaces(
+          Array.isArray(workspaceResult.workspaces)
+            ? workspaceResult.workspaces
+            : [],
+        )
+        setError(null)
       } catch (nextError) {
         setError(nextError instanceof Error ? nextError.message : String(nextError))
       }
@@ -3477,37 +3577,6 @@ window.__ModuleLoader__.load({
     React.useEffect(() => {
       void load()
     }, [load])
-
-    async function mutate(method, args) {
-      if (!snapshot || busy) return false
-      setBusy(true)
-      setSaved(false)
-      try {
-        const next = await request(method, {
-          ...args,
-          expectedRevision: snapshot.revision,
-        })
-        setSnapshot(next)
-        applyRepositoryInfo(next)
-        setError(null)
-        return true
-      } catch (nextError) {
-        const message = nextError instanceof Error ? nextError.message : String(nextError)
-        await load()
-        setError(message)
-        return false
-      } finally {
-        setBusy(false)
-      }
-    }
-
-    function add() {
-      const normalized = project.trim()
-      if (!normalized) return
-      void mutate('addProject', { project: normalized }).then((didSave) => {
-        if (didSave) setProject('')
-      })
-    }
 
     function updateRepositoryField(name, value) {
       setRepositoryDraft((current) => ({ ...current, [name]: value }))
@@ -3531,18 +3600,10 @@ window.__ModuleLoader__.load({
         repository,
         expectedRepositoryRevision: repositoryInfo.repositoryRevision,
       })
-        .then(async (info) => {
+        .then((info) => {
           applyRepositoryInfo(info)
           setSaved(true)
-          try {
-            setSnapshot(await request('overview', {}))
-            setError(null)
-          } catch (nextError) {
-            setSnapshot(null)
-            const message =
-              nextError instanceof Error ? nextError.message : String(nextError)
-            setError(`Repository settings were saved, but Pavo could not load the board: ${message}`)
-          }
+          setError(null)
         })
         .catch((nextError) => {
           setError(nextError instanceof Error ? nextError.message : String(nextError))
@@ -3568,7 +3629,7 @@ window.__ModuleLoader__.load({
       React.createElement(
         'p',
         { className: 'pavo-settings-copy' },
-        'Manage the Git repository used by Pavo and the Project values available to every Work.'
+        'Manage the Git repository used by Pavo. Workspace choices come directly from DSH.'
       ),
       repositoryInfo?.settingsWarning
         ? React.createElement(
@@ -3719,72 +3780,38 @@ window.__ModuleLoader__.load({
       React.createElement(
         'section',
         { className: 'pavo-settings-section' },
-        React.createElement('h3', null, 'Projects'),
+        React.createElement('h3', null, 'DSH Workspaces'),
         React.createElement(
           'p',
           null,
-          'Project names become selectable values on every Work. A Project cannot be removed while a Work still uses it.',
+          'Workspace choices are managed by DSH. Add, rename, reorder, or remove them from the DSH sidebar; Pavo stores stable Workspace IDs and follows title changes automatically.',
         ),
-        React.createElement(
-          'div',
-          { className: 'pavo-project-add' },
-          React.createElement('input', {
-            className: 'pavo-input',
-            value: project,
-            disabled: busy || !snapshot,
-            maxLength: 128,
-            placeholder: 'New project name',
-            'aria-label': 'New project name',
-            onChange: (event) => setProject(event.target.value),
-            onKeyDown: (event) => {
-              if (event.key === 'Enter') add()
-            },
-          }),
-          React.createElement(
-            'button',
-            {
-              type: 'button',
-              className: 'pavo-button',
-              disabled: busy || !snapshot || project.trim().length === 0,
-              onClick: add,
-            },
-            'Add project',
-          ),
-        ),
-        snapshot === null
+        dshWorkspaces.length === 0
           ? React.createElement(
               'div',
-              { className: 'pavo-project-empty' },
-              'Connect a valid repository to manage projects.',
+              { className: 'pavo-workspace-empty' },
+              'No DSH Workspaces are currently registered.',
             )
-          : snapshot.board.projects.length === 0
-            ? React.createElement(
-                'div',
-                { className: 'pavo-project-empty' },
-                'No projects are configured yet.',
-              )
-            : React.createElement(
-                'ul',
-                { className: 'pavo-project-list' },
-                snapshot.board.projects.map((name) =>
+          : React.createElement(
+              'ul',
+              { className: 'pavo-workspace-list' },
+              dshWorkspaces.map((workspace) =>
+                React.createElement(
+                  'li',
+                  { className: 'pavo-workspace-row', key: workspace.id },
                   React.createElement(
-                    'li',
-                    { className: 'pavo-project-row', key: name },
-                    React.createElement('span', null, name),
-                    React.createElement(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'pavo-button pavo-button-danger',
-                        disabled: busy,
-                        onClick: () =>
-                          void mutate('removeProject', { project: name }),
-                      },
-                      'Remove',
-                    ),
+                    'span',
+                    null,
+                    workspaceRosterLabel(workspace, dshWorkspaces),
+                  ),
+                  React.createElement(
+                    'small',
+                    null,
+                    workspace.unavailable ? 'Unavailable' : 'Available',
                   ),
                 ),
               ),
+            ),
       ),
     )
   }

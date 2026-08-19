@@ -40,9 +40,8 @@ const MAX_COLUMNS = 32
 const MAX_WORKS = 10_000
 const MAX_WORKFLOWS = 10_000
 const MAX_TEMPLATES = 2_000
-const MAX_PROJECTS = 1_000
 const MAX_ID_LENGTH = 128
-const MAX_PROJECT_LENGTH = 128
+const MAX_LEGACY_WORKSPACE_TITLE_LENGTH = 128
 const MAX_KEY_LENGTH = 128
 const MAX_TITLE_LENGTH = 500
 const MAX_DESCRIPTION_LENGTH = 50_000
@@ -233,22 +232,24 @@ export function normalizeWorkflow(input = DEFAULT_WORKFLOW) {
   return workflow
 }
 
-export function normalizeProjects(input = []) {
-  if (!Array.isArray(input)) {
-    throw new TypeError('The board projects must be an array.')
-  }
-  if (input.length > MAX_PROJECTS) {
-    throw new TypeError(`The board must not exceed ${MAX_PROJECTS} projects.`)
-  }
+export function normalizeWorkspaceReference(input) {
+  const workspaceId = requireString(
+    input?.workspaceId ?? '',
+    'Work workspaceId',
+    MAX_ID_LENGTH,
+    { allowEmpty: true },
+  )
+  if (workspaceId) return { workspaceId }
 
-  const names = new Set()
-  return input.map((value, index) => {
-    const project = requireString(value, `Project ${index}`, MAX_PROJECT_LENGTH)
-    const identity = project.toLocaleLowerCase('en-US')
-    if (names.has(identity)) throw new TypeError(`Duplicate project: ${project}`)
-    names.add(identity)
-    return project
-  })
+  const legacyWorkspaceTitle = requireString(
+    input?.legacyWorkspaceTitle ?? input?.project ?? '',
+    'Work legacy Workspace title',
+    MAX_LEGACY_WORKSPACE_TITLE_LENGTH,
+    { allowEmpty: true },
+  )
+  return legacyWorkspaceTitle
+    ? { workspaceId: '', legacyWorkspaceTitle }
+    : { workspaceId: '' }
 }
 
 function normalizeWorkType(value, fallback = 'goal') {
@@ -293,26 +294,15 @@ function normalizeUpstreamWaterLevels(input, knownIds, workId) {
 
 function normalizeEditableFields(
   input,
-  projects,
   {
     knownIds = new Set(),
     workflowIds = new Set([ROOT_WORKFLOW_ID]),
     workId = '',
   } = {},
 ) {
-  const project = requireString(
-    input?.project ?? '',
-    'Work project',
-    MAX_PROJECT_LENGTH,
-    { allowEmpty: true },
-  )
-  if (project && !projects.includes(project)) {
-    throw new TypeError(`Work project is not configured: ${project}`)
-  }
-
   return {
     type: normalizeWorkType(input?.type),
-    project,
+    ...normalizeWorkspaceReference(input),
     key: requireString(input?.key ?? '', 'Work key', MAX_KEY_LENGTH, {
       allowEmpty: true,
     }),
@@ -418,7 +408,6 @@ function normalizeWorkflows(input, fallbackTimestamp) {
 
 function normalizeTemplateWorkContent(
   input,
-  projects,
   columnIds,
   {
     knownIds = new Set(['template-work']),
@@ -434,7 +423,6 @@ function normalizeTemplateWorkContent(
       upstreamWaterLevels: source.upstreamWaterLevels ?? {},
       workflowId: source.workflowId ?? ROOT_WORKFLOW_ID,
     },
-    projects,
     { knownIds, workflowIds, workId },
   )
   const columnId = requireString(
@@ -450,7 +438,7 @@ function normalizeTemplateWorkContent(
   return { ...contentFields, columnId }
 }
 
-function normalizeWorkflowTemplateContent(input, projects, columnIds) {
+function normalizeWorkflowTemplateContent(input, columnIds) {
   const content = requireObject(
     input,
     'Workflow template content must be an object.',
@@ -557,7 +545,7 @@ function normalizeWorkflowTemplateContent(input, projects, columnIds) {
   })
   const works = indexedWorks.map(({ work, id }) => ({
     id,
-    ...normalizeTemplateWorkContent(work, projects, columnIds, {
+    ...normalizeTemplateWorkContent(work, columnIds, {
       knownIds: workIds,
       workflowIds,
       workId: id,
@@ -572,7 +560,7 @@ function normalizeWorkflowTemplateContent(input, projects, columnIds) {
   }
 }
 
-function normalizeTemplates(input, projects, columns) {
+function normalizeTemplates(input, columns) {
   const source = input === undefined ? [] : input
   if (!Array.isArray(source)) {
     throw new TypeError('The board templates must be an array.')
@@ -606,12 +594,8 @@ function normalizeTemplates(input, projects, columns) {
           : 0,
       content:
         template.kind === 'work'
-          ? normalizeTemplateWorkContent(template.content, projects, columnIds)
-          : normalizeWorkflowTemplateContent(
-              template.content,
-              projects,
-              columnIds,
-            ),
+          ? normalizeTemplateWorkContent(template.content, columnIds)
+          : normalizeWorkflowTemplateContent(template.content, columnIds),
       createdAt,
       updatedAt: normalizeTimestamp(template.updatedAt, createdAt),
     }
@@ -638,7 +622,6 @@ export function createDefaultBoard({
 
   return {
     version: 1,
-    projects: [],
     columns: columns.map((column, order) => cloneColumn(column, order)),
     workflows: [rootWorkflow(createdAt)],
     templates: [],
@@ -646,7 +629,7 @@ export function createDefaultBoard({
       {
         id: workId,
         type: 'goal',
-        project: '',
+        workspaceId: '',
         key: 'WELCOME',
         title: `Move this Work to ${columns[1]?.title ?? columns[0].title} to try the board.`,
         description: '',
@@ -666,7 +649,6 @@ export function normalizeBoard(input, { workflow } = {}) {
   const board = requireObject(input, 'The board must be an object.')
   const configuredWorkflow = workflow ? normalizeWorkflow(workflow) : undefined
   const columnInput = configuredWorkflow ?? board.columns
-  const projects = normalizeProjects(board.projects ?? [])
   const fallbackTimestamp = board.works?.[0]?.createdAt ?? board.cards?.[0]?.createdAt
   const workflows = normalizeWorkflows(board.workflows, fallbackTimestamp)
   const workflowIds = new Set(workflows.map((container) => container.id))
@@ -725,7 +707,7 @@ export function normalizeBoard(input, { workflow } = {}) {
   })
 
   const works = indexedWorks.map(({ work, id, index }) => {
-    const fields = normalizeEditableFields(work, projects, {
+    const fields = normalizeEditableFields(work, {
       knownIds: workIds,
       workflowIds,
       workId: id,
@@ -750,10 +732,9 @@ export function normalizeBoard(input, { workflow } = {}) {
   })
 
   const sortedColumns = columns.sort((left, right) => left.order - right.order)
-  const templates = normalizeTemplates(board.templates, projects, sortedColumns)
+  const templates = normalizeTemplates(board.templates, sortedColumns)
   return {
     version: 1,
-    projects,
     columns: sortedColumns,
     workflows,
     templates,
@@ -765,7 +746,10 @@ export function workTemplateContentFromWork(workInput) {
   const work = requireObject(workInput, 'The source Work must be an object.')
   return {
     type: work.type,
-    project: work.project,
+    workspaceId: work.workspaceId,
+    ...(work.legacyWorkspaceTitle
+      ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
+      : {}),
     key: work.key,
     title: work.title,
     description: work.description,
@@ -1026,7 +1010,10 @@ export function instantiateTemplate(
   const createdWorks = template.content.works.map((work) => ({
     id: workIdMap.get(work.id),
     type: work.type,
-    project: work.project,
+    workspaceId: work.workspaceId,
+    ...(work.legacyWorkspaceTitle
+      ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
+      : {}),
     key: work.key,
     title: work.title,
     description: work.description,
@@ -1060,7 +1047,7 @@ export function addWork(boardInput, input, { workflow } = {}) {
   }
   const knownIds = new Set(board.works.map((work) => work.id))
   knownIds.add(id)
-  const fields = normalizeEditableFields(input, board.projects, {
+  const fields = normalizeEditableFields(input, {
     knownIds,
     workflowIds: new Set(board.workflows.map((container) => container.id)),
     workId: id,
@@ -1097,7 +1084,7 @@ export function updateWork(boardInput, input, { workflow } = {}) {
   const work = board.works.find((candidate) => candidate.id === workId)
 
   if (!work) throw new TypeError(`Unknown Work: ${workId}`)
-  const fields = normalizeEditableFields(input, board.projects, {
+  const fields = normalizeEditableFields(input, {
     legacy: true,
     knownIds: new Set(board.works.map((candidate) => candidate.id)),
     workflowIds: new Set(board.workflows.map((container) => container.id)),
@@ -1193,47 +1180,6 @@ export function removeWorkflow(boardInput, input, { workflow } = {}) {
     throw new TypeError(`Workflow ${workflowId} still contains Works.`)
   }
   board.workflows = board.workflows.filter((item) => item.id !== workflowId)
-  return board
-}
-
-export function addProject(boardInput, input, { workflow } = {}) {
-  const board = normalizeBoard(boardInput, { workflow })
-  if (board.projects.length >= MAX_PROJECTS) {
-    throw new TypeError(`The board must not exceed ${MAX_PROJECTS} projects.`)
-  }
-  const project = requireString(input?.project, 'Project', MAX_PROJECT_LENGTH)
-  if (
-    board.projects.some(
-      (candidate) =>
-        candidate.toLocaleLowerCase('en-US') ===
-        project.toLocaleLowerCase('en-US'),
-    )
-  ) {
-    throw new TypeError(`Project is already configured: ${project}`)
-  }
-  board.projects.push(project)
-  return board
-}
-
-export function removeProject(boardInput, input, { workflow } = {}) {
-  const board = normalizeBoard(boardInput, { workflow })
-  const project = requireString(input?.project, 'Project', MAX_PROJECT_LENGTH)
-  if (!board.projects.includes(project)) {
-    throw new TypeError(`Unknown project: ${project}`)
-  }
-  if (board.works.some((work) => work.project === project)) {
-    throw new TypeError(`Project ${project} is still used by one or more Works.`)
-  }
-  if (
-    board.templates.some((template) =>
-      template.kind === 'work'
-        ? template.content.project === project
-        : template.content.works.some((work) => work.project === project),
-    )
-  ) {
-    throw new TypeError(`Project ${project} is still used by one or more templates.`)
-  }
-  board.projects = board.projects.filter((candidate) => candidate !== project)
   return board
 }
 

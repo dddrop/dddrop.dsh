@@ -302,10 +302,10 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 7
-const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6])
-const TICKET_FORMAT_VERSION = 5
-const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4])
+const BOARD_FORMAT_VERSION = 8
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7])
+const TICKET_FORMAT_VERSION = 6
+const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4, 5])
 const MAX_TICKET_ID_LENGTH = 128
 const SAFE_TICKET_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
 
@@ -333,13 +333,30 @@ function ticketFileName(id) {
   return `b64--${Buffer.from(id, 'utf8').toString('base64url')}.json`
 }
 
+function templateUsesLegacyProject(template) {
+  if (!template || typeof template !== 'object') return false
+  if (template.kind === 'work') {
+    return Boolean(
+      template.content &&
+      typeof template.content === 'object' &&
+      Object.hasOwn(template.content, 'project'),
+    )
+  }
+  return Boolean(
+    template.content &&
+    Array.isArray(template.content.works) &&
+    template.content.works.some(
+      (work) => work && typeof work === 'object' && Object.hasOwn(work, 'project'),
+    ),
+  )
+}
+
 function splitBoardDocuments(boardInput, workflow) {
   const board = normalizeBoard(boardInput, { workflow })
   return {
     board,
     boardDocument: {
       version: BOARD_FORMAT_VERSION,
-      projects: board.projects,
       columns: board.columns,
       workflows: board.workflows,
       templates: board.templates,
@@ -353,7 +370,10 @@ function splitBoardDocuments(boardInput, workflow) {
       version: TICKET_FORMAT_VERSION,
       id: work.id,
       type: work.type,
-      project: work.project,
+      workspaceId: work.workspaceId,
+      ...(work.legacyWorkspaceTitle
+        ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
+        : {}),
       key: work.key,
       title: work.title,
       description: work.description,
@@ -764,7 +784,7 @@ export class GitBoardRepository {
         ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
           document.version,
         ) ||
-        ([4, 5, 6, BOARD_FORMAT_VERSION].includes(document.version)
+        ([4, 5, 6, 7, BOARD_FORMAT_VERSION].includes(document.version)
           ? !Array.isArray(document.works)
           : !Array.isArray(document.tickets))
       ) {
@@ -773,8 +793,16 @@ export class GitBoardRepository {
         )
       }
 
-      const projects = document.projects ?? []
-      const placements = ([4, 5, 6, BOARD_FORMAT_VERSION].includes(document.version)
+      if (
+        document.version === BOARD_FORMAT_VERSION &&
+        (Object.hasOwn(document, 'projects') ||
+          document.templates?.some(templateUsesLegacyProject))
+      ) {
+        throw new TypeError(
+          'Current board storage must use DSH Workspace references instead of Project fields.',
+        )
+      }
+      const placements = ([4, 5, 6, 7, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
         .map((value, index) => {
@@ -858,6 +886,14 @@ export class GitBoardRepository {
             `Work ${placement.id} must use version ${[...LEGACY_TICKET_FORMAT_VERSIONS, TICKET_FORMAT_VERSION].join(', ')}.`,
           )
         }
+        if (
+          ticket.version === TICKET_FORMAT_VERSION &&
+          Object.hasOwn(ticket, 'project')
+        ) {
+          throw new TypeError(
+            `Work ${placement.id} must use workspaceId instead of project.`,
+          )
+        }
         if (ticket.id !== placement.id) {
           throw new TypeError(
             `Ticket file ${placement.id} contains a different ticket id.`,
@@ -871,7 +907,13 @@ export class GitBoardRepository {
         works.push({
           id: ticket.id,
           type: ticket.type ?? 'goal',
-          project: ticket.project ?? '',
+          workspaceId: ticket.workspaceId ?? '',
+          ...(ticket.legacyWorkspaceTitle || ticket.project
+            ? {
+                legacyWorkspaceTitle:
+                  ticket.legacyWorkspaceTitle ?? ticket.project,
+              }
+            : {}),
           key: ticket.key ?? '',
           title: ticket.title,
           description: ticket.description ?? ticket.body ?? '',
@@ -911,7 +953,6 @@ export class GitBoardRepository {
       const board = normalizeBoard(
         {
           version: 1,
-          projects,
           columns: document.columns,
           workflows: document.workflows,
           templates: document.templates,
@@ -1186,7 +1227,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'refactor(pavo): add structured assignees',
+      'refactor(pavo): use DSH Workspaces',
       snapshot.board,
     )
     this.cachedSnapshot = migrated

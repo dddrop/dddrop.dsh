@@ -1,6 +1,5 @@
 import {
   ROOT_WORKFLOW_ID,
-  addProject,
   addTemplate,
   addWork,
   addWorkflow,
@@ -8,7 +7,6 @@ import {
   instantiateTemplate,
   moveWork,
   normalizeAssignee,
-  removeProject,
   removeTemplate,
   removeWork,
   removeWorkflow,
@@ -23,7 +21,7 @@ import { RepositoryController } from './repository-settings.js'
 import { uuidv7 } from './uuid-v7.js'
 
 export const name = 'dddrop-pavo'
-export const inject = ['webServer', 'webRuntime']
+export const inject = ['webServer', 'webRuntime', 'workspaceRegistry']
 export { Config }
 
 const API_PATH = '/_dddrop/pavo'
@@ -274,11 +272,34 @@ async function publicAgentPresets(agentPresets) {
   }))
 }
 
+async function publicWorkspaces(workspaceRegistry) {
+  return Promise.all(
+    workspaceRegistry.list().map(async (workspace) => {
+      let unavailable = false
+      try {
+        unavailable = (await workspace.status()) !== 'ok'
+      } catch {
+        unavailable = true
+      }
+      return {
+        id: workspace.id,
+        title: workspace.title,
+        ...(unavailable ? { unavailable: true } : {}),
+      }
+    }),
+  )
+}
+
 function mergedWorkInput(work, args) {
   return {
     ...work,
     type: args.type ?? work.type,
-    project: args.project ?? work.project,
+    workspaceId:
+      args.workspaceId === undefined ? work.workspaceId : args.workspaceId,
+    legacyWorkspaceTitle:
+      args.workspaceId === undefined
+        ? work.legacyWorkspaceTitle
+        : args.legacyWorkspaceTitle,
     key: args.key ?? work.key,
     title: args.title ?? work.title,
     description: args.description ?? args.body ?? work.description,
@@ -329,7 +350,7 @@ function templateContentFromArgs(board, args, kind) {
   throw new TypeError('Template kind must be work or workflow.')
 }
 
-async function dispatch(controller, request, agentPresets) {
+async function dispatch(controller, request, agentPresets, workspaceRegistry) {
   const body = await readJsonBody(request)
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new RequestError('The request body must be an object.')
@@ -339,6 +360,11 @@ async function dispatch(controller, request, agentPresets) {
       ? body.args
       : {}
   const mutationOptions = { expectedRevision: args.expectedRevision }
+  if (Object.hasOwn(args, 'project')) {
+    throw new RequestError(
+      'Pavo Projects were replaced by DSH Workspace references.',
+    )
+  }
 
   switch (body.method) {
     case 'repositorySettings':
@@ -347,6 +373,8 @@ async function dispatch(controller, request, agentPresets) {
       return publicSnapshot(await controller.overview(), controller)
     case 'agentPresets':
       return { presets: await publicAgentPresets(agentPresets) }
+    case 'workspaces':
+      return { workspaces: await publicWorkspaces(workspaceRegistry) }
     case 'saveRepository':
       assertRepositorySettingsRequest(request)
       return controller.updateRepository(
@@ -365,7 +393,7 @@ async function dispatch(controller, request, agentPresets) {
               {
                 id: uuidv7(),
                 type: args.type ?? 'goal',
-                project: args.project,
+                workspaceId: args.workspaceId ?? '',
                 key: args.key,
                 title: args.title,
                 description: args.description ?? args.body ?? '',
@@ -546,32 +574,9 @@ async function dispatch(controller, request, agentPresets) {
         controller,
       )
     case 'addProject':
-      return publicSnapshot(
-        await controller.mutate({
-          ...mutationOptions,
-          commitMessage: 'feat(pavo): add project',
-          mutation: (board) =>
-            addProject(
-              board,
-              { project: args.project },
-              { workflow: controller.config.columns },
-            ),
-        }),
-        controller,
-      )
     case 'removeProject':
-      return publicSnapshot(
-        await controller.mutate({
-          ...mutationOptions,
-          commitMessage: 'feat(pavo): remove project',
-          mutation: (board) =>
-            removeProject(
-              board,
-              { project: args.project },
-              { workflow: controller.config.columns },
-            ),
-        }),
-        controller,
+      throw new RequestError(
+        'Pavo Projects were replaced by DSH Workspace references.',
       )
     case 'move':
     case 'moveWork':
@@ -611,7 +616,12 @@ async function dispatch(controller, request, agentPresets) {
   }
 }
 
-function createHandler(controller, trustedHosts, agentPresets) {
+function createHandler(
+  controller,
+  trustedHosts,
+  agentPresets,
+  workspaceRegistry,
+) {
   return async (request, response) => {
     try {
       assertTrustedRequest(request, trustedHosts)
@@ -620,7 +630,12 @@ function createHandler(controller, trustedHosts, agentPresets) {
         sendJson(response, 405, { ok: false, error: 'Method not allowed.' })
         return
       }
-      const value = await dispatch(controller, request, agentPresets)
+      const value = await dispatch(
+        controller,
+        request,
+        agentPresets,
+        workspaceRegistry,
+      )
       sendJson(response, 200, { ok: true, value })
     } catch (error) {
       const clientError =
@@ -654,7 +669,10 @@ function workView(work) {
   return {
     id: work.id,
     type: work.type,
-    project: work.project,
+    workspaceId: work.workspaceId,
+    ...(work.legacyWorkspaceTitle
+      ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
+      : {}),
     key: work.key,
     title: work.title,
     description: work.description,
@@ -684,7 +702,10 @@ function workSummary(work) {
   return {
     id: work.id,
     type: work.type,
-    project: work.project,
+    workspaceId: work.workspaceId,
+    ...(work.legacyWorkspaceTitle
+      ? { legacyWorkspaceTitle: work.legacyWorkspaceTitle }
+      : {}),
     key: work.key,
     title: work.title,
     assignee: work.assignee,
@@ -778,13 +799,24 @@ const AGENT_PRESET_SCHEMA = {
   },
 }
 
+const DSH_WORKSPACE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    title: { type: 'string', required: true },
+    unavailable: { type: 'boolean' },
+  },
+}
+
 const WORK_SUMMARY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
     id: { type: 'string', required: true },
     type: { type: 'string', enum: ['goal', 'ongoing'], required: true },
-    project: { type: 'string', required: true },
+    workspaceId: { type: 'string', required: true },
+    legacyWorkspaceTitle: { type: 'string' },
     key: { type: 'string', required: true },
     title: { type: 'string', required: true },
     assignee: { ...ASSIGNEE_SCHEMA, required: true },
@@ -814,7 +846,8 @@ const WORK_SCHEMA = {
   properties: {
     id: { type: 'string', required: true },
     type: { type: 'string', enum: ['goal', 'ongoing'], required: true },
-    project: { type: 'string', required: true },
+    workspaceId: { type: 'string', required: true },
+    legacyWorkspaceTitle: { type: 'string' },
     key: { type: 'string', required: true },
     title: { type: 'string', required: true },
     description: { type: 'string', required: true },
@@ -872,7 +905,10 @@ function registerAgentTools(ctx, controller) {
     description:
       'List Pavo Works and the current optimistic revision. Pavo is passive: inspect the Works and decide what, if anything, to execute or change.',
     parameters: {
-      project: { type: 'string', description: 'Filter by exact Project.' },
+      workspaceId: {
+        type: 'string',
+        description: 'Filter by exact DSH Workspace ID; empty means no Workspace.',
+      },
       columnId: { type: 'string', description: 'Filter by status column.' },
       workflowId: { type: 'string', description: 'Filter by exact Workflow container.' },
       assignee: {
@@ -893,10 +929,10 @@ function registerAgentTools(ctx, controller) {
           revision: { type: 'string', required: true },
           works: { type: 'array', required: true, items: WORK_SUMMARY_SCHEMA },
           total: { type: 'integer', required: true },
-          projects: {
+          workspaces: {
             type: 'array',
             required: true,
-            items: { type: 'string' },
+            items: DSH_WORKSPACE_SCHEMA,
           },
           workflow: {
             type: 'array',
@@ -918,13 +954,20 @@ function registerAgentTools(ctx, controller) {
       render: (_args, value) => renderToolValue('Pavo Work list', value),
     },
     async execute(args) {
-      const [snapshot, agentPresetList] = await Promise.all([
+      const [snapshot, agentPresetList, workspaceList] = await Promise.all([
         controller.overview(),
         publicAgentPresets(ctx.get('agentPresets')),
+        publicWorkspaces(ctx.workspaceRegistry),
       ])
+      const workspaceTitles = new Map(
+        workspaceList.map((workspace) => [workspace.id, workspace.title]),
+      )
       const query = args.query?.toLocaleLowerCase('en-US')
       const works = snapshot.board.works.filter((work) => {
-        if (args.project !== undefined && work.project !== args.project) return false
+        if (
+          args.workspaceId !== undefined &&
+          work.workspaceId !== args.workspaceId
+        ) return false
         if (args.columnId !== undefined && work.columnId !== args.columnId) return false
         if (args.workflowId !== undefined && work.workflowId !== args.workflowId) return false
         if (
@@ -936,7 +979,8 @@ function registerAgentTools(ctx, controller) {
           work.key,
           work.title,
           work.description,
-          work.project,
+          work.workspaceId,
+          workspaceTitles.get(work.workspaceId) ?? work.legacyWorkspaceTitle ?? '',
           assigneeText(work.assignee),
         ].some((value) => value.toLocaleLowerCase('en-US').includes(query))
       })
@@ -944,7 +988,7 @@ function registerAgentTools(ctx, controller) {
         revision: snapshot.revision,
         works: works.map(workSummary),
         total: works.length,
-        projects: [...snapshot.board.projects],
+        workspaces: workspaceList,
         workflow: snapshot.workflow.map((column) => ({
           id: column.id,
           title: column.title,
@@ -1012,7 +1056,10 @@ function registerAgentTools(ctx, controller) {
       expectedRevision: { type: 'string', required: true },
       workId: { type: 'string' },
       type: { type: 'string', enum: ['goal', 'ongoing'] },
-      project: { type: 'string' },
+      workspaceId: {
+        type: 'string',
+        description: 'Stable DSH Workspace ID; empty clears the Workspace.',
+      },
       key: { type: 'string' },
       title: { type: 'string' },
       description: { type: 'string' },
@@ -1039,7 +1086,7 @@ function registerAgentTools(ctx, controller) {
     async execute(args) {
       const contentFields = [
         'type',
-        'project',
+        'workspaceId',
         'key',
         'title',
         'description',
@@ -1097,7 +1144,7 @@ function registerAgentTools(ctx, controller) {
                 {
                   id: targetWorkId,
                   type: args.type ?? 'goal',
-                  project: args.project,
+                  workspaceId: args.workspaceId ?? '',
                   key: args.key,
                   title: args.title,
                   description: args.description ?? '',
@@ -1573,7 +1620,12 @@ export async function apply(ctx, config) {
   const controller = await RepositoryController.create(config)
   const trustedHosts = ctx.get('webRuntime')?.trustedHosts ?? []
   const agentPresets = ctx.get('agentPresets')
-  const handler = createHandler(controller, trustedHosts, agentPresets)
+  const handler = createHandler(
+    controller,
+    trustedHosts,
+    agentPresets,
+    ctx.workspaceRegistry,
+  )
 
   for (const path of [API_PATH, LEGACY_API_PATH]) {
     ctx.effect(() =>

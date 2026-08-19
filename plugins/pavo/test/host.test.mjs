@@ -65,7 +65,12 @@ async function git(repositoryPath, ...args) {
   return result.stdout.trim()
 }
 
-function createContext(registerRoute, registerTool, agentPresets) {
+function createContext(
+  registerRoute,
+  registerTool,
+  agentPresets,
+  workspaceRegistry = { list: () => [] },
+) {
   const tools = registerTool
     ? {
         register(tool) {
@@ -75,6 +80,7 @@ function createContext(registerRoute, registerTool, agentPresets) {
       }
     : undefined
   return {
+    workspaceRegistry,
     get(service) {
       if (service === 'webRuntime') return { trustedHosts: [] }
       if (service === 'tools') return tools
@@ -139,22 +145,22 @@ test('serves one global Git-backed board and commits every mutation', async () =
 
     const initialRevision = overview.payload.value.revision
     const welcomeWorkId = overview.payload.value.board.works[0].id
-    const configured = await call(route, 'addProject', {
+    const legacyProjectRequest = await call(route, 'addProject', {
       project: 'Harness',
       expectedRevision: initialRevision,
     })
-    assert.equal(configured.response.status, 200, configured.response.body)
-    assert.deepEqual(configured.payload.value.board.projects, ['Harness'])
+    assert.equal(legacyProjectRequest.response.status, 400)
+    assert.match(legacyProjectRequest.payload.error, /replaced by DSH Workspace/)
 
     const added = await call(route, 'add', {
-      project: 'Harness',
+      workspaceId: 'workspace-harness',
       key: 'DSH-101',
       title: 'Validate Git persistence',
       body: 'Ensure every card field is persisted.',
       assignee: { kind: 'human' },
       waterLevel: '123456789012345678901234567890',
       columnId: 'ready',
-      expectedRevision: configured.payload.value.revision,
+      expectedRevision: initialRevision,
     })
     assert.equal(added.response.status, 200, added.response.body)
     assert.equal(added.payload.value.board.works.length, 2)
@@ -162,7 +168,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
       (card) => card.title === 'Validate Git persistence',
     )
     assert.equal(addedCard.columnId, 'ready')
-    assert.equal(addedCard.project, 'Harness')
+    assert.equal(addedCard.workspaceId, 'workspace-harness')
     assert.equal(addedCard.key, 'DSH-101')
     assert.equal(addedCard.type, 'goal')
     assert.equal(addedCard.description, 'Ensure every card field is persisted.')
@@ -178,13 +184,6 @@ test('serves one global Git-backed board and commits every mutation', async () =
       /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
     )
 
-    const referencedProject = await call(route, 'removeProject', {
-      project: 'Harness',
-      expectedRevision: added.payload.value.revision,
-    })
-    assert.equal(referencedProject.response.status, 400)
-    assert.match(referencedProject.payload.error, /still used/)
-
     const skippedMove = await call(route, 'move', {
       cardId: addedCard.id,
       columnId: 'review',
@@ -196,7 +195,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const edited = await call(route, 'updateWork', {
       workId: addedCard.id,
       type: 'ongoing',
-      project: 'Harness',
+      workspaceId: 'workspace-harness',
       key: 'DSH-101A',
       title: 'Validate commits and pushes',
       description: 'Ensure every Work field update is persisted.',
@@ -248,8 +247,8 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.version, 7)
-    assert.deepEqual(board.projects, ['Harness'])
+    assert.equal(board.version, 8)
+    assert.equal(board.projects, undefined)
     assert.equal(board.cards, undefined)
     assert.equal(board.tickets, undefined)
     assert.equal(board.works.length, 1)
@@ -264,7 +263,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
         'utf8',
       ),
     )
-    assert.equal(welcomeTicket.version, 5)
+    assert.equal(welcomeTicket.version, 6)
     assert.equal(welcomeTicket.id, board.works[0].id)
     assert.equal(welcomeTicket.type, 'goal')
     assert.equal(welcomeTicket.description, '')
@@ -279,7 +278,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
       ),
       { code: 'ENOENT' },
     )
-    assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '6')
+    assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '5')
     assert.deepEqual(
       (await git(root, 'log', '--format=%s')).split('\n'),
       [
@@ -287,7 +286,6 @@ test('serves one global Git-backed board and commits every mutation', async () =
         'feat(pavo): move work',
         'feat(pavo): update work',
         'feat(pavo): add work',
-        'feat(pavo): add project',
         'feat(pavo): initialize board',
       ],
     )
@@ -484,6 +482,68 @@ test('serves a sanitized Agent Preset roster for Assignee selection', async () =
   }
 })
 
+test('serves sanitized DSH Workspaces without paths or session IDs', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-workspaces-'))
+  const routes = []
+  const workspaceRegistry = {
+    list() {
+      return [
+        {
+          id: 'workspace-one',
+          title: 'Harness',
+          path: '/private/harness',
+          sessionIds: ['private-session'],
+          async status() {
+            return 'ok'
+          },
+        },
+        {
+          id: 'workspace-missing',
+          title: 'Moved Workspace',
+          path: '/private/missing',
+          sessionIds: [],
+          async status() {
+            return 'missing-dir'
+          },
+        },
+      ]
+    },
+  }
+  try {
+    await apply(
+      createContext(
+        (registered) => routes.push(registered),
+        undefined,
+        undefined,
+        workspaceRegistry,
+      ),
+      {
+        repositoryPath: root,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath: path.join(root, '.pavo-settings.json'),
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const response = await call(route, 'workspaces')
+    assert.equal(response.response.status, 200, response.response.body)
+    assert.deepEqual(response.payload.value.workspaces, [
+      { id: 'workspace-one', title: 'Harness' },
+      {
+        id: 'workspace-missing',
+        title: 'Moved Workspace',
+        unavailable: true,
+      },
+    ])
+    const payload = JSON.stringify(response.payload.value)
+    assert.equal(payload.includes('/private/'), false)
+    assert.equal(payload.includes('private-session'), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('registers passive Agent tools for reading and updating Works', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-tools-'))
   const routes = []
@@ -493,6 +553,16 @@ test('registers passive Agent tools for reading and updating Works', async () =>
       createContext(
         (registered) => routes.push(registered),
         (tool) => tools.push(tool),
+        undefined,
+        {
+          list: () => [
+            {
+              id: 'workspace-harness',
+              title: 'Harness',
+              status: async () => 'ok',
+            },
+          ],
+        },
       ),
       {
         repositoryPath: root,
@@ -533,7 +603,9 @@ test('registers passive Agent tools for reading and updating Works', async () =>
     assert.equal(listed.total, 1)
     assert.equal(listed.works[0].type, 'goal')
     assert.equal(listed.workflow[0].id, 'backlog')
-    assert.deepEqual(listed.projects, [])
+    assert.deepEqual(listed.workspaces, [
+      { id: 'workspace-harness', title: 'Harness' },
+    ])
     assert.equal(listed.workflows[0].title, 'Root Workflow')
     assert.equal(listed.works[0].workflowId, 'root')
     assert.deepEqual(listed.agentPresets, [])
@@ -561,11 +633,13 @@ test('registers passive Agent tools for reading and updating Works', async () =>
       expectedRevision: read.revision,
       workId: read.work.id,
       type: 'ongoing',
+      workspaceId: 'workspace-harness',
       description: 'Maintain this Work continuously.',
       assignee: { kind: 'human' },
       waterLevel: '1000000000000000000000000000000.25',
     })
     assert.equal(updated.work.type, 'ongoing')
+    assert.equal(updated.work.workspaceId, 'workspace-harness')
     assert.equal(updated.work.description, 'Maintain this Work continuously.')
     assert.deepEqual(updated.work.assignee, { kind: 'human' })
     assert.equal(updated.work.waterLevel, '1000000000000000000000000000000.25')
@@ -574,6 +648,11 @@ test('registers passive Agent tools for reading and updating Works', async () =>
     })
     assert.equal(humanAssigned.total, 1)
     assert.equal(humanAssigned.works[0].id, updated.work.id)
+    const inWorkspace = await listTool.execute({
+      workspaceId: 'workspace-harness',
+    })
+    assert.equal(inWorkspace.total, 1)
+    assert.equal(inWorkspace.works[0].id, updated.work.id)
 
     await assert.rejects(
       updateTool.execute({
@@ -602,9 +681,9 @@ test('registers passive Agent tools for reading and updating Works', async () =>
     const emptyFieldsCreated = await updateTool.execute({
       action: 'create',
       expectedRevision: assigned.revision,
-      title: 'Work without Project or KEY',
+      title: 'Work without Workspace or KEY',
     })
-    assert.equal(emptyFieldsCreated.work.project, '')
+    assert.equal(emptyFieldsCreated.work.workspaceId, '')
     assert.equal(emptyFieldsCreated.work.key, '')
 
     const templateCreated = await updateTemplateTool.execute({

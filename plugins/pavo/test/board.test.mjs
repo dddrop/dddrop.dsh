@@ -4,7 +4,6 @@ import test from 'node:test'
 import {
   DEFAULT_WORKFLOW,
   ROOT_WORKFLOW_ID,
-  addProject,
   addTemplate,
   addWork,
   addWorkflow,
@@ -15,7 +14,7 @@ import {
   normalizeAssignee,
   normalizeBoard,
   normalizeWorkflow,
-  removeProject,
+  normalizeWorkspaceReference,
   removeTemplate,
   removeWork,
   removeWorkflow,
@@ -31,18 +30,14 @@ import { createUuidV7Generator } from '../src/uuid-v7.js'
 const fixedTime = '2026-01-01T00:00:00.000Z'
 
 function createBoard() {
-  return addProject(
-    createDefaultBoard({ id: 'welcome-work', now: fixedTime }),
-    { project: 'Harness' },
-    { workflow: DEFAULT_WORKFLOW },
-  )
+  return createDefaultBoard({ id: 'welcome-work', now: fixedTime })
 }
 
 function workInput(overrides = {}) {
   return {
     id: 'new-work',
     type: 'goal',
-    project: 'Harness',
+    workspaceId: 'workspace-harness',
     key: 'DSH-42',
     title: 'Ship the Pavo plugin',
     description: 'Persist every field in Git.',
@@ -61,7 +56,7 @@ test('creates the configured five-column board with a Goal Work', () => {
     board.columns.map((column) => column.title),
     ['Backlog', 'Ready', 'In Progress', 'Review', 'Done'],
   )
-  assert.deepEqual(board.projects, ['Harness'])
+  assert.equal(board.works[0].workspaceId, '')
   assert.deepEqual(
     board.workflows.map(({ id, title, parentWorkflowId }) => ({
       id,
@@ -133,13 +128,12 @@ test('adds, edits, moves, and removes a Work without mutating inputs', () => {
 test('accepts forward references and cyclic Work dependencies', () => {
   const board = normalizeBoard({
     version: 1,
-    projects: ['Pavo'],
     columns: DEFAULT_WORKFLOW,
     works: [
       {
         id: 'code',
         type: 'goal',
-        project: 'Pavo',
+        workspaceId: 'workspace-pavo',
         key: 'PAVO-1',
         title: 'Implement',
         description: 'Address review feedback.',
@@ -150,7 +144,7 @@ test('accepts forward references and cyclic Work dependencies', () => {
       {
         id: 'review',
         type: 'ongoing',
-        project: 'Pavo',
+        workspaceId: 'workspace-pavo',
         key: 'PAVO-2',
         title: 'Review',
         description: 'Review the implementation.',
@@ -191,7 +185,6 @@ test('rejects unknown and self dependencies without applying DAG rules', () => {
 test('normalizes legacy cards and body fields into Works', () => {
   const board = normalizeBoard({
     version: 1,
-    projects: [],
     columns: DEFAULT_WORKFLOW,
     cards: [
       {
@@ -208,14 +201,14 @@ test('normalizes legacy cards and body fields into Works', () => {
       type: board.works[0].type,
       description: board.works[0].description,
       upstreamWaterLevels: board.works[0].upstreamWaterLevels,
-      project: board.works[0].project,
+      workspaceId: board.works[0].workspaceId,
       key: board.works[0].key,
     },
     {
       type: 'goal',
       description: 'Legacy body',
       upstreamWaterLevels: {},
-      project: '',
+      workspaceId: '',
       key: '',
     },
   )
@@ -225,29 +218,46 @@ test('normalizes legacy cards and body fields into Works', () => {
   )
 })
 
-test('allows Project and KEY to be empty on create and edit', () => {
+test('stores stable optional DSH Workspace IDs and preserves legacy Projects', () => {
+  assert.deepEqual(normalizeWorkspaceReference({ workspaceId: '' }), {
+    workspaceId: '',
+  })
+  assert.deepEqual(
+    normalizeWorkspaceReference({ workspaceId: 'workspace-harness' }),
+    { workspaceId: 'workspace-harness' },
+  )
+  assert.deepEqual(normalizeWorkspaceReference({ project: 'Legacy Project' }), {
+    workspaceId: '',
+    legacyWorkspaceTitle: 'Legacy Project',
+  })
+
   const created = addWork(
     createBoard(),
-    workInput({ project: '', key: '' }),
+    workInput({ workspaceId: '', key: '' }),
     { workflow: DEFAULT_WORKFLOW },
   )
   const work = created.works.find((candidate) => candidate.id === 'new-work')
-  assert.equal(work.project, '')
+  assert.equal(work.workspaceId, '')
   assert.equal(work.key, '')
 
   const populated = updateWork(
     created,
-    { ...work, workId: work.id, project: 'Harness', key: 'DSH-42' },
+    {
+      ...work,
+      workId: work.id,
+      workspaceId: 'workspace-harness',
+      key: 'DSH-42',
+    },
     { workflow: DEFAULT_WORKFLOW },
   )
   const current = populated.works.find((candidate) => candidate.id === work.id)
   const cleared = updateWork(
     populated,
-    { ...current, workId: current.id, project: '', key: '' },
+    { ...current, workId: current.id, workspaceId: '', key: '' },
     { workflow: DEFAULT_WORKFLOW },
   )
   const clearedWork = cleared.works.find((candidate) => candidate.id === work.id)
-  assert.equal(clearedWork.project, '')
+  assert.equal(clearedWork.workspaceId, '')
   assert.equal(clearedWork.key, '')
 })
 
@@ -580,7 +590,7 @@ test('maps a captured fixed Root Workflow directly to the destination', () => {
   )
 })
 
-test('rejects malformed templates and protects configured Projects they use', () => {
+test('rejects malformed templates and preserves unavailable Workspace IDs', () => {
   assert.throws(
     () => addTemplate(createBoard(), {
       id: 'bad',
@@ -598,26 +608,27 @@ test('rejects malformed templates and protects configured Projects they use', ()
     /rootWorkflowId must identify the only parentless Workflow|parent cycle/,
   )
   const withTemplate = addTemplate(createBoard(), {
-    id: 'project-template',
+    id: 'workspace-template',
     kind: 'work',
     name: 'Harness Work',
-    content: workTemplateContentFromWork(createBoard().works[0]),
-  })
-  const populated = updateTemplate(withTemplate, {
-    templateId: 'project-template',
     content: {
-      ...withTemplate.templates[0].content,
-      project: 'Harness',
+      ...workTemplateContentFromWork(createBoard().works[0]),
+      workspaceId: 'deleted-workspace',
     },
   })
-  assert.throws(
-    () => removeProject(populated, { project: 'Harness' }),
-    /still used by one or more templates/,
+  const instantiated = instantiateTemplate(
+    withTemplate,
+    { templateId: 'workspace-template', targetWorkflowId: ROOT_WORKFLOW_ID },
+    { idFactory: () => 'workspace-work' },
+  )
+  assert.equal(
+    instantiated.works.find((work) => work.id === 'workspace-work').workspaceId,
+    'deleted-workspace',
   )
   assert.throws(
     () => instantiateTemplate(
-      populated,
-      { templateId: 'project-template', targetWorkflowId: 'missing' },
+      withTemplate,
+      { templateId: 'workspace-template', targetWorkflowId: 'missing' },
       { idFactory: () => 'unused' },
     ),
     /Unknown target Workflow/,
@@ -629,20 +640,6 @@ test('compares arbitrary-precision WaterLevels without floating point', () => {
   assert.equal(compareWaterLevels('1.2300', '1.23'), 0)
   assert.equal(compareWaterLevels('0.0000000000000000001', '0.0000000000000000002'), -1)
   assert.throws(() => compareWaterLevels('1e3', '1000'), /without an exponent/)
-})
-
-test('manages Project options and protects referenced Projects', () => {
-  const board = createBoard()
-  const withWork = addWork(board, workInput(), { workflow: DEFAULT_WORKFLOW })
-  assert.throws(
-    () => removeProject(withWork, { project: 'Harness' }),
-    /still used by one or more Works/,
-  )
-  const withoutWork = removeWork(withWork, { workId: 'new-work' })
-  assert.deepEqual(
-    removeProject(withoutWork, { project: 'Harness' }).projects,
-    [],
-  )
 })
 
 test('enforces workflow transitions and Work field validation', () => {
@@ -694,7 +691,7 @@ test('generates monotonic UUIDv7 identifiers across clock regressions', () => {
 
 test('declares a statically configured Host plugin', () => {
   assert.equal(name, 'dddrop-pavo')
-  assert.deepEqual(inject, ['webServer', 'webRuntime'])
+  assert.deepEqual(inject, ['webServer', 'webRuntime', 'workspaceRegistry'])
   const valid = Config['~standard'].validate({
     repositoryPath: '/tmp/pavo-data',
     autoPull: false,
