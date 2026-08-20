@@ -393,6 +393,15 @@ async function launchWorkSession(controller, args, services) {
   if (work.columnId !== 'ready') {
     throw new RequestError('A Work must be Ready before it can run.')
   }
+  const worksById = new Map(
+    snapshot.board.works.map((candidate) => [candidate.id, candidate]),
+  )
+  if (!automaticDependenciesAreDone(worksById, work)) {
+    throw new RequestError('Every upstream Work must be Done before this Work can run.')
+  }
+  if (args.requireAutoMode && work.type === 'goal' && work.completedAt !== null) {
+    throw new RequestError('A completed Goal Work can only be run again manually.')
+  }
   if (!work.workspaceId) {
     throw new RequestError('Choose a DSH Workspace before running this Work.')
   }
@@ -500,6 +509,14 @@ async function launchWorkSession(controller, args, services) {
       mutation: (board) => {
         if (args.requireAutoMode && !board.autoMode.enabled) {
           throw new RequestError('Pavo automatic mode was disabled before the Work could start.')
+        }
+        const currentWork = board.works.find((candidate) => candidate.id === work.id)
+        if (
+          args.requireAutoMode &&
+          currentWork?.type === 'goal' &&
+          currentWork.completedAt !== null
+        ) {
+          throw new RequestError('A completed Goal Work can only be run again manually.')
         }
         return startWork(
           board,
@@ -637,15 +654,9 @@ function createRunCoordinator(controller, services) {
   }
 }
 
-function automaticDependenciesAreCurrent(worksById, work) {
-  return Object.entries(work.upstreamWaterLevels).every(
-    ([upstreamId, acknowledgedWaterLevel]) => {
-      const upstream = worksById.get(upstreamId)
-      return (
-        upstream !== undefined &&
-        compareWaterLevels(upstream.waterLevel, acknowledgedWaterLevel) <= 0
-      )
-    },
+function automaticDependenciesAreDone(worksById, work) {
+  return Object.keys(work.upstreamWaterLevels).every(
+    (upstreamId) => worksById.get(upstreamId)?.columnId === 'done',
   )
 }
 
@@ -708,7 +719,8 @@ function createAutoModeManager(controller, runCoordinator, initialSnapshot) {
         .filter(
           (work) =>
             work.columnId === 'ready' &&
-            work.assignee.kind === 'agent-preset',
+            work.assignee.kind === 'agent-preset' &&
+            !(work.type === 'goal' && work.completedAt !== null),
         )
         .map((work) => [work.id, automaticRunFingerprint(work)]),
     )
@@ -739,7 +751,8 @@ function createAutoModeManager(controller, runCoordinator, initialSnapshot) {
           candidate.columnId !== 'ready' ||
           !candidate.workspaceId ||
           candidate.assignee.kind !== 'agent-preset' ||
-          !automaticDependenciesAreCurrent(worksById, candidate)
+          (candidate.type === 'goal' && candidate.completedAt !== null) ||
+          !automaticDependenciesAreDone(worksById, candidate)
         ) {
           return false
         }
@@ -926,7 +939,7 @@ async function dispatch(controller, request, services, runCoordinator) {
 
   switch (body.method) {
     case 'repositorySettings':
-      return controller.describe()
+      return controller.settings()
     case 'overview':
       return publicSnapshot(await controller.overview(), controller)
     case 'agentPresets':
@@ -941,6 +954,9 @@ async function dispatch(controller, request, services, runCoordinator) {
         args.repository,
         args.expectedRepositoryRevision,
       )
+    case 'saveColumns':
+      assertRepositorySettingsRequest(request)
+      return controller.updateColumns(args.columns, args.expectedColumnRevision)
     case 'add':
     case 'addWork':
       return publicSnapshot(
@@ -1167,6 +1183,7 @@ async function dispatch(controller, request, services, runCoordinator) {
               {
                 workId: args.workId ?? args.cardId,
                 columnId: args.columnId,
+                updatedAt: new Date().toISOString(),
               },
               { workflow: controller.config.columns },
             ),
@@ -1260,6 +1277,8 @@ function workView(work) {
     assignee: work.assignee,
     waterLevel: work.waterLevel,
     upstreamWaterLevels: { ...work.upstreamWaterLevels },
+    runUpstreamWaterLevels: { ...work.runUpstreamWaterLevels },
+    completedAt: work.completedAt,
     workflowId: work.workflowId,
     columnId: work.columnId,
     createdAt: work.createdAt,
@@ -1292,6 +1311,7 @@ function workSummary(work) {
     title: work.title,
     assignee: work.assignee,
     waterLevel: work.waterLevel,
+    completedAt: work.completedAt,
     workflowId: work.workflowId,
     columnId: work.columnId,
     upstreamCount: Object.keys(work.upstreamWaterLevels).length,
@@ -1338,7 +1358,7 @@ const WATER_LEVEL_MAP_SCHEMA = {
   type: 'object',
   additionalProperties: true,
   description:
-    'Dictionary whose keys are immutable upstream Work IDs and values are acknowledged non-negative decimal WaterLevels.',
+    'Dictionary whose keys are immutable upstream Work IDs and values are lifecycle-owned acknowledged WaterLevels. New dependencies must use 0; existing values advance only when the Work reaches Done.',
 }
 
 const WORKFLOW_COLUMN_SCHEMA = {
@@ -1404,6 +1424,10 @@ const WORK_SUMMARY_SCHEMA = {
     title: { type: 'string', required: true },
     assignee: { ...ASSIGNEE_SCHEMA, required: true },
     waterLevel: { type: 'string', required: true },
+    completedAt: {
+      oneOf: [{ type: 'string' }, { type: 'null' }],
+      required: true,
+    },
     workflowId: { type: 'string', required: true },
     columnId: { type: 'string', required: true },
     upstreamCount: { type: 'integer', required: true },
@@ -1438,6 +1462,11 @@ const WORK_SCHEMA = {
     assignee: { ...ASSIGNEE_SCHEMA, required: true },
     waterLevel: { type: 'string', required: true },
     upstreamWaterLevels: { ...WATER_LEVEL_MAP_SCHEMA, required: true },
+    runUpstreamWaterLevels: { ...WATER_LEVEL_MAP_SCHEMA, required: true },
+    completedAt: {
+      oneOf: [{ type: 'string' }, { type: 'null' }],
+      required: true,
+    },
     workflowId: { type: 'string', required: true },
     columnId: { type: 'string', required: true },
     createdAt: { type: 'string', required: true },
@@ -1631,7 +1660,7 @@ function registerAgentTools(ctx, controller) {
   const updateTool = defineTool({
     name: 'pavo_update_work',
     description:
-      'Create, edit, move, or delete a Pavo Work using an exact revision. When board automatic mode is enabled, the mutation may trigger status reconciliation and Ready Agent execution. Pavo never increments WaterLevels or acknowledges upstream versions automatically.',
+      'Create, edit, move, or delete a Pavo Work using an exact revision. Automatic mode waits for every upstream Work to be Done, may run eligible Agent-assigned Works, and reactivates stale Ongoing Works. Pavo snapshots upstream WaterLevels at execution start and acknowledges that snapshot only when the Work reaches Done. It never increments a Work own WaterLevel.',
     parameters: {
       action: {
         type: 'string',
@@ -1758,7 +1787,7 @@ function registerAgentTools(ctx, controller) {
             case 'move':
               return moveWork(
                 board,
-                { workId: args.workId, columnId: args.columnId },
+                { workId: args.workId, columnId: args.columnId, updatedAt: now },
                 { workflow: controller.config.columns },
               )
             case 'delete':
@@ -2114,7 +2143,7 @@ function registerAgentTools(ctx, controller) {
   const applyTemplateTool = defineTool({
     name: 'pavo_apply_template',
     description:
-      'Instantiate one Pavo template under an explicit target Workflow using fresh IDs. Automatic mode may subsequently reconcile and run eligible created Works; instantiation itself never changes WaterLevels or acknowledges dependencies.',
+      'Instantiate one Pavo template under an explicit target Workflow using fresh IDs. Automatic mode may subsequently run eligible created Works after every upstream Work is Done; instantiation itself never changes WaterLevels or acknowledges dependencies.',
     parameters: {
       expectedRevision: { type: 'string', required: true },
       templateId: { type: 'string', required: true },

@@ -7,12 +7,14 @@ import {
   addTemplate,
   addWork,
   addWorkflow,
+  columnsFromSettings,
   compareWaterLevels,
   createDefaultBoard,
   instantiateTemplate,
   moveWork,
   normalizeAssignee,
   normalizeBoard,
+  normalizeColumnSettings,
   normalizeWorkflow,
   normalizeWorkspaceReference,
   reconcileAutoMode,
@@ -53,11 +55,11 @@ function workInput(overrides = {}) {
   }
 }
 
-test('creates the configured five-column board with a Goal Work', () => {
+test('creates the six source-owned Columns with a Goal Work', () => {
   const board = createBoard()
   assert.deepEqual(
     board.columns.map((column) => column.title),
-    ['Backlog', 'Ready', 'In Progress', 'Review', 'Done'],
+    ['Backlog', 'Ready', 'In Progress', 'Review', 'Done', 'Archive'],
   )
   assert.equal(board.works[0].workspaceId, '')
   assert.deepEqual(
@@ -74,6 +76,47 @@ test('creates the configured five-column board with a Goal Work', () => {
   assert.equal(board.works[0].description, '')
   assert.equal(board.works[0].waterLevel, '0')
   assert.deepEqual(board.works[0].upstreamWaterLevels, {})
+})
+
+test('derives immutable Column structure from editable Pavo settings', () => {
+  const defaults = normalizeColumnSettings()
+  assert.equal(defaults.reviewEnabled, true)
+  assert.equal(defaults.archiveVisible, false)
+
+  const columns = columnsFromSettings({
+    titles: {
+      backlog: 'Queue',
+      ready: 'Prepared',
+      'in-progress': 'Executing',
+      review: 'Verification',
+      done: 'Complete',
+      archive: 'Cold Storage',
+    },
+    reviewEnabled: false,
+    archiveVisible: true,
+  })
+  assert.deepEqual(
+    columns.map(({ id, title }) => ({ id, title })),
+    [
+      { id: 'backlog', title: 'Queue' },
+      { id: 'ready', title: 'Prepared' },
+      { id: 'in-progress', title: 'Executing' },
+      { id: 'done', title: 'Complete' },
+      { id: 'archive', title: 'Cold Storage' },
+    ],
+  )
+  assert.deepEqual(
+    columns.find((column) => column.id === 'in-progress').allowedTransitions,
+    ['ready', 'done'],
+  )
+  assert.throws(
+    () => normalizeColumnSettings({ titles: { custom: 'Custom' } }),
+    /Unknown Pavo Column title id/,
+  )
+  assert.throws(
+    () => normalizeColumnSettings({ titles: { backlog: '   ' } }),
+    /non-empty string/,
+  )
 })
 
 test('adds, edits, moves, and removes a Work without mutating inputs', () => {
@@ -95,7 +138,7 @@ test('adds, edits, moves, and removes a Work without mutating inputs', () => {
         title: 'Maintain the Git-backed Pavo plugin',
         description: 'Keep every field synchronized.',
         waterLevel: '999999999999999999999999999999999999999999',
-        upstreamWaterLevels: { 'welcome-work': '0001.2500' },
+        upstreamWaterLevels: { 'welcome-work': '0' },
       }),
       updatedAt: '2026-01-02T00:00:00.000Z',
     },
@@ -104,10 +147,30 @@ test('adds, edits, moves, and removes a Work without mutating inputs', () => {
   const work = edited.works.find((candidate) => candidate.id === 'new-work')
   assert.equal(work.type, 'ongoing')
   assert.equal(work.description, 'Keep every field synchronized.')
-  assert.deepEqual(work.upstreamWaterLevels, { 'welcome-work': '1.25' })
+  assert.deepEqual(work.upstreamWaterLevels, { 'welcome-work': '0' })
 
-  const moved = moveWork(
+  let upstreamDone = moveWork(
     edited,
+    { workId: 'welcome-work', columnId: 'ready' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  upstreamDone = moveWork(
+    upstreamDone,
+    { workId: 'welcome-work', columnId: 'in-progress' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  upstreamDone = moveWork(
+    upstreamDone,
+    { workId: 'welcome-work', columnId: 'review' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  upstreamDone = moveWork(
+    upstreamDone,
+    { workId: 'welcome-work', columnId: 'done' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  const moved = moveWork(
+    upstreamDone,
     { workId: 'new-work', columnId: 'in-progress' },
     { workflow: DEFAULT_WORKFLOW },
   )
@@ -119,9 +182,28 @@ test('adds, edits, moves, and removes a Work without mutating inputs', () => {
     () => removeWork(moved, { workId: 'welcome-work' }),
     /still referenced by Work new-work/,
   )
-  const detached = updateWork(
+  let editable = moveWork(
     moved,
-    { workId: 'new-work', ...work, upstreamWaterLevels: {} },
+    { workId: 'new-work', columnId: 'review' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  editable = moveWork(
+    editable,
+    { workId: 'new-work', columnId: 'done' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  editable = moveWork(
+    editable,
+    { workId: 'new-work', columnId: 'backlog' },
+    { workflow: DEFAULT_WORKFLOW },
+  )
+  const detached = updateWork(
+    editable,
+    {
+      workId: 'new-work',
+      ...editable.works.find((candidate) => candidate.id === 'new-work'),
+      upstreamWaterLevels: {},
+    },
     { workflow: DEFAULT_WORKFLOW },
   )
   const removed = removeWork(detached, { workId: 'welcome-work' })
@@ -460,6 +542,42 @@ test('creates, edits, applies, and removes a Work template', () => {
   assert.equal(removeTemplate(instantiated, { templateId: 'template-work' }).templates.length, 0)
 })
 
+test('prevents Review removal while Work and Workflow Templates reference it', () => {
+  let board = createBoard()
+  board = moveWork(board, { workId: 'welcome-work', columnId: 'ready' })
+  board = moveWork(board, { workId: 'welcome-work', columnId: 'in-progress' })
+  board = moveWork(board, { workId: 'welcome-work', columnId: 'review' })
+  const workTemplateBoard = addTemplate(board, {
+    id: 'review-work-template',
+    kind: 'work',
+    name: 'Review Work',
+    content: workTemplateContentFromWork(board.works[0]),
+    excludedExternalDependencies: 0,
+    createdAt: fixedTime,
+  })
+  const capturedWorkflow = workflowTemplateContentFromWorkflow(
+    board,
+    ROOT_WORKFLOW_ID,
+  )
+  const workflowTemplateBoard = addTemplate(board, {
+    id: 'review-workflow-template',
+    kind: 'workflow',
+    name: 'Review Workflow',
+    content: capturedWorkflow.content,
+    excludedExternalDependencies: capturedWorkflow.excludedExternalDependencies,
+    createdAt: fixedTime,
+  })
+  const withoutReview = columnsFromSettings({ reviewEnabled: false })
+  assert.throws(
+    () => normalizeBoard(workTemplateBoard, { workflow: withoutReview }),
+    /unknown column: review/,
+  )
+  assert.throws(
+    () => normalizeBoard(workflowTemplateBoard, { workflow: withoutReview }),
+    /unknown column: review/,
+  )
+})
+
 test('captures and instantiates nested Workflow templates with remapped cycles', () => {
   const base = normalizeBoard({
     ...createBoard(),
@@ -665,6 +783,26 @@ test('reconciles eligible and stale Works when automatic mode is enabled', () =>
   board = addWork(
     board,
     workInput({
+      id: 'busy-upstream',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'human' },
+      waterLevel: '2',
+      columnId: 'in-progress',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'waiting-for-done',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'human' },
+      upstreamWaterLevels: { 'busy-upstream': '1' },
+      columnId: 'backlog',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
       id: 'eligible-human',
       workspaceId: 'workspace-harness',
       assignee: { kind: 'human' },
@@ -731,30 +869,182 @@ test('reconciles eligible and stale Works when automatic mode is enabled', () =>
   const columns = Object.fromEntries(
     reconciled.works.map((work) => [work.id, work.columnId]),
   )
+  assert.equal(columns['waiting-for-done'], 'backlog')
   assert.equal(columns['eligible-human'], 'ready')
   assert.equal(columns['missing-workspace'], 'backlog')
   assert.equal(columns.unassigned, 'backlog')
-  assert.equal(columns['stale-backlog'], 'backlog')
+  assert.equal(columns['stale-backlog'], 'ready')
   assert.equal(columns['stale-ongoing'], 'backlog')
   assert.equal(columns['stale-goal'], 'done')
   const ongoing = reconciled.works.find((work) => work.id === 'stale-ongoing')
   assert.equal(ongoing.sessionId, 'session-ongoing')
   assert.equal(ongoing.waterLevel, '12')
   assert.equal(ongoing.updatedAt, '2026-01-03T00:00:00.000Z')
-
-  const rollback = updateWork(
-    board,
-    {
-      workId: 'upstream',
-      ...board.works.find((work) => work.id === 'upstream'),
-      waterLevel: '3',
-    },
-  )
+  const nextPass = reconcileAutoMode(reconciled, {
+    now: '2026-01-03T00:00:01.000Z',
+  })
   assert.equal(
-    reconcileAutoMode(rollback).works.find(
-      (work) => work.id === 'stale-backlog',
-    ).columnId,
+    nextPass.works.find((work) => work.id === 'stale-ongoing').columnId,
     'ready',
+  )
+
+  assert.throws(
+    () =>
+      updateWork(board, {
+        workId: 'upstream',
+        ...board.works.find((work) => work.id === 'upstream'),
+        waterLevel: '3',
+      }),
+    /must not decrease/,
+  )
+})
+
+test('captures upstream WaterLevels at start and acknowledges them only on Done', () => {
+  let board = createBoard()
+  board = addWork(
+    board,
+    workInput({
+      id: 'source',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'human' },
+      waterLevel: '2',
+      columnId: 'done',
+    }),
+  )
+  board = addWork(
+    board,
+    workInput({
+      id: 'consumer',
+      type: 'goal',
+      workspaceId: 'workspace-harness',
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+      upstreamWaterLevels: { source: '1' },
+      columnId: 'ready',
+    }),
+  )
+
+  board = startWork(board, {
+    workId: 'consumer',
+    sessionId: 'session-first',
+    updatedAt: '2026-01-04T00:00:00.000Z',
+  })
+  let consumer = board.works.find((work) => work.id === 'consumer')
+  assert.deepEqual(consumer.upstreamWaterLevels, { source: '0' })
+  assert.deepEqual(consumer.runUpstreamWaterLevels, { source: '2' })
+
+  board = updateWork(board, {
+    workId: 'source',
+    ...board.works.find((work) => work.id === 'source'),
+    waterLevel: '3',
+  })
+  board = moveWork(board, {
+    workId: 'consumer',
+    columnId: 'review',
+    updatedAt: '2026-01-04T12:00:00.000Z',
+  })
+  board = moveWork(board, {
+    workId: 'consumer',
+    columnId: 'done',
+    updatedAt: '2026-01-05T00:00:00.000Z',
+  })
+  consumer = board.works.find((work) => work.id === 'consumer')
+  assert.deepEqual(consumer.upstreamWaterLevels, { source: '2' })
+  assert.deepEqual(consumer.runUpstreamWaterLevels, {})
+  assert.equal(consumer.completedAt, '2026-01-05T00:00:00.000Z')
+  assert.equal(reconcileAutoMode(setAutoMode(board, { enabled: true })).works.find(
+    (work) => work.id === 'consumer',
+  ).columnId, 'done')
+  assert.throws(
+    () =>
+      updateWork(board, {
+        workId: 'consumer',
+        ...consumer,
+        upstreamWaterLevels: { source: '3' },
+      }),
+    /advance only when the Work reaches Done/,
+  )
+
+  board = moveWork(board, { workId: 'consumer', columnId: 'backlog' })
+  const reconciled = reconcileAutoMode(setAutoMode(board, { enabled: true }))
+  assert.equal(
+    reconciled.works.find((work) => work.id === 'consumer').columnId,
+    'backlog',
+  )
+  assert.throws(
+    () =>
+      updateWork(reconciled, {
+        workId: 'consumer',
+        ...reconciled.works.find((work) => work.id === 'consumer'),
+        type: 'ongoing',
+      }),
+    /cannot change its type/,
+  )
+  const manuallyReadied = moveWork(reconciled, {
+    workId: 'consumer',
+    columnId: 'ready',
+  })
+  assert.throws(
+    () =>
+      moveWork(manuallyReadied, {
+        workId: 'consumer',
+        columnId: 'in-progress',
+      }),
+    /explicit Re-run/,
+  )
+  const rerun = startWork(manuallyReadied, {
+    workId: 'consumer',
+    sessionId: 'session-second',
+  })
+  assert.equal(
+    rerun.works.find((work) => work.id === 'consumer').sessionId,
+    'session-second',
+  )
+})
+
+test('archives only inactive Works without downstream dependents', () => {
+  let board = addWork(
+    createBoard(),
+    workInput({
+      id: 'dependent',
+      upstreamWaterLevels: { 'welcome-work': '0' },
+    }),
+  )
+  assert.throws(
+    () => moveWork(board, { workId: 'welcome-work', columnId: 'archive' }),
+    /another Work depends on it/,
+  )
+  board = removeWork(board, { workId: 'dependent' })
+  board = moveWork(board, { workId: 'welcome-work', columnId: 'archive' })
+  assert.equal(reconcileAutoMode(setAutoMode(board, { enabled: true })).works[0].columnId, 'archive')
+  assert.throws(
+    () =>
+      addWork(
+        board,
+        workInput({
+          id: 'late-dependent',
+          upstreamWaterLevels: { 'welcome-work': '0' },
+        }),
+      ),
+    /cannot depend on archived Work/,
+  )
+  board = addWork(board, workInput({ id: 'independent' }))
+  const independent = board.works.find((work) => work.id === 'independent')
+  assert.throws(
+    () =>
+      updateWork(board, {
+        workId: independent.id,
+        ...independent,
+        upstreamWaterLevels: { 'welcome-work': '0' },
+      }),
+    /cannot depend on archived Work/,
+  )
+
+  let running = createBoard()
+  running = moveWork(running, { workId: 'welcome-work', columnId: 'ready' })
+  running = moveWork(running, { workId: 'welcome-work', columnId: 'in-progress' })
+  assert.throws(
+    () => moveWork(running, { workId: 'welcome-work', columnId: 'archive' }),
+    /cannot move/,
   )
 })
 
@@ -847,14 +1137,14 @@ test('enforces workflow transitions and Work field validation', () => {
         .map((candidate) => candidate.id),
     })),
   }
-  const moved = moveWork(
-    unrestricted,
-    { workId: 'new-work', columnId: 'done' },
-    { workflow: DEFAULT_WORKFLOW },
-  )
-  assert.equal(
-    moved.works.find((work) => work.id === 'new-work').columnId,
-    'done',
+  assert.throws(
+    () =>
+      moveWork(
+        unrestricted,
+        { workId: 'new-work', columnId: 'done' },
+        { workflow: DEFAULT_WORKFLOW },
+      ),
+    /cannot move/,
   )
   assert.throws(
     () => addWork(createBoard(), workInput({ type: 'task' })),
@@ -910,5 +1200,10 @@ test('declares a statically configured Host plugin', () => {
     autoPush: false,
   })
   assert.equal(valid.issues, undefined)
-  assert.equal(valid.value.columns.length, 5)
+  assert.equal(valid.value.columns.length, 6)
+  const legacyColumns = Config['~standard'].validate({
+    repositoryPath: '/tmp/pavo-data',
+    columns: DEFAULT_WORKFLOW,
+  })
+  assert.match(legacyColumns.issues[0].message, /source-owned/)
 })

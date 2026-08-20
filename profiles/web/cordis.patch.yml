@@ -17,19 +17,3 @@
         initializeRepository: false
         pollIntervalMs: 3000
         pullIntervalMs: 5000
-        columns:
-          - id: backlog
-            title: Backlog
-            allowedTransitions: [ready]
-          - id: ready
-            title: Ready
-            allowedTransitions: [backlog, in-progress]
-          - id: in-progress
-            title: In Progress
-            allowedTransitions: [ready, review]
-          - id: review
-            title: Review
-            allowedTransitions: [in-progress, done]
-          - id: done
-            title: Done
-            allowedTransitions: [review, backlog]

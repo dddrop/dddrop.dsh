@@ -19,11 +19,12 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 
 import {
-  DEFAULT_WORKFLOW,
+  COLUMN_IDS,
   ROOT_WORKFLOW_ID,
+  columnsFromSettings,
   createDefaultBoard,
   normalizeBoard,
-  normalizeWorkflow,
+  normalizeColumnSettings,
 } from './board.js'
 import { uuidv7 } from './uuid-v7.js'
 
@@ -125,11 +126,17 @@ function normalizeDataDirectory(value) {
 
 export function normalizeConfig(input) {
   const config = requireObject(input, 'The Pavo configuration must be an object.')
+  if (Object.hasOwn(config, 'columns') && !Object.hasOwn(config, 'columnSettings')) {
+    throw new TypeError(
+      'Pavo Columns are source-owned and must be configured through Pavo Settings.',
+    )
+  }
   const repositoryPath = requireString(
     config.repositoryPath,
     'repositoryPath',
   )
-  const workflow = normalizeWorkflow(config.columns ?? DEFAULT_WORKFLOW)
+  const columnSettings = normalizeColumnSettings(config.columnSettings)
+  const workflow = columnsFromSettings(columnSettings)
 
   return {
     repositoryPath: path.resolve(expandHome(repositoryPath)),
@@ -172,7 +179,9 @@ export function normalizeConfig(input) {
       'gitAuthorEmail',
       'pavo@localhost',
     ),
+    columnSettings,
     columns: workflow,
+    allowColumnMigration: config.allowColumnMigration !== false,
   }
 }
 
@@ -302,10 +311,10 @@ async function hasFileIdentity(filePath, identity) {
   )
 }
 
-const BOARD_FORMAT_VERSION = 11
-const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7, 8, 9, 10])
-const TICKET_FORMAT_VERSION = 7
-const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6])
+const BOARD_FORMAT_VERSION = 12
+const LEGACY_BOARD_FORMAT_VERSIONS = Object.freeze([2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+const TICKET_FORMAT_VERSION = 8
+const LEGACY_TICKET_FORMAT_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7])
 const MAX_TICKET_ID_LENGTH = 128
 const SAFE_TICKET_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
 
@@ -358,7 +367,6 @@ function splitBoardDocuments(boardInput, workflow) {
     boardDocument: {
       version: BOARD_FORMAT_VERSION,
       autoMode: board.autoMode,
-      columns: board.columns,
       workflows: board.workflows,
       templates: board.templates,
       works: board.works.map((work, order) => ({
@@ -382,6 +390,8 @@ function splitBoardDocuments(boardInput, workflow) {
       assignee: work.assignee,
       waterLevel: work.waterLevel,
       upstreamWaterLevels: work.upstreamWaterLevels,
+      runUpstreamWaterLevels: work.runUpstreamWaterLevels,
+      completedAt: work.completedAt,
       workflowId: work.workflowId,
       createdAt: work.createdAt,
       updatedAt: work.updatedAt,
@@ -803,7 +813,7 @@ export class GitBoardRepository {
         ![...LEGACY_BOARD_FORMAT_VERSIONS, BOARD_FORMAT_VERSION].includes(
           document.version,
         ) ||
-        ([4, 5, 6, 7, 8, 9, 10, BOARD_FORMAT_VERSION].includes(document.version)
+        ([4, 5, 6, 7, 8, 9, 10, 11, BOARD_FORMAT_VERSION].includes(document.version)
           ? !Array.isArray(document.works)
           : !Array.isArray(document.tickets))
       ) {
@@ -812,24 +822,34 @@ export class GitBoardRepository {
         )
       }
 
+      if (document.version === 11) {
+        if (!Array.isArray(document.columns)) {
+          throw new TypeError('Legacy board version 11 must define columns.')
+        }
+        const supportedColumnIds = new Set(COLUMN_IDS)
+        for (const column of document.columns) {
+          if (!supportedColumnIds.has(column?.id)) {
+            throw new TypeError(
+              `Legacy board references an unsupported Column id: ${column?.id ?? 'unknown'}`,
+            )
+          }
+        }
+      }
       if (
         document.version === BOARD_FORMAT_VERSION &&
         (Object.hasOwn(document, 'projects') ||
           document.templates?.some(templateUsesLegacyProject) ||
-          !Array.isArray(document.columns) ||
-          document.columns.some(
-            (column) => !Array.isArray(column?.allowedTransitions),
-          ) ||
+          Object.hasOwn(document, 'columns') ||
           document.autoMode === null ||
           typeof document.autoMode !== 'object' ||
           Array.isArray(document.autoMode) ||
           typeof document.autoMode.enabled !== 'boolean')
       ) {
         throw new TypeError(
-          'Current board storage must use DSH Workspace references, define column allowedTransitions, and define autoMode.',
+          'Current board storage must use DSH Workspace references, omit Pavo-owned Columns, and define autoMode.',
         )
       }
-      const placements = ([4, 5, 6, 7, 8, 9, 10, BOARD_FORMAT_VERSION].includes(document.version)
+      const placements = ([4, 5, 6, 7, 8, 9, 10, 11, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
         .map((value, index) => {
@@ -924,6 +944,16 @@ export class GitBoardRepository {
               `Work ${placement.id} must define its sessionId reference.`,
             )
           }
+          if (!Object.hasOwn(ticket, 'runUpstreamWaterLevels')) {
+            throw new TypeError(
+              `Work ${placement.id} must define its active upstream WaterLevel snapshot.`,
+            )
+          }
+          if (!Object.hasOwn(ticket, 'completedAt')) {
+            throw new TypeError(
+              `Work ${placement.id} must define its completion timestamp.`,
+            )
+          }
         }
         if (ticket.id !== placement.id) {
           throw new TypeError(
@@ -952,6 +982,8 @@ export class GitBoardRepository {
           assignee: ticket.assignee ?? '',
           waterLevel: ticket.waterLevel ?? '0',
           upstreamWaterLevels: ticket.upstreamWaterLevels ?? {},
+          runUpstreamWaterLevels: ticket.runUpstreamWaterLevels ?? {},
+          completedAt: ticket.completedAt,
           workflowId: ticket.workflowId ?? ROOT_WORKFLOW_ID,
           columnId: placement.columnId,
           createdAt: ticket.createdAt,
@@ -986,7 +1018,7 @@ export class GitBoardRepository {
         {
           version: 1,
           autoMode: document.autoMode,
-          columns: document.columns,
+          columns: this.config.columns,
           workflows: document.workflows,
           templates: document.templates,
           works,
@@ -1260,7 +1292,7 @@ export class GitBoardRepository {
     await this.assertCleanBoardPath()
     const migrated = await this.commitMutation(
       snapshot.board,
-      'feat(pavo): persist automatic mode',
+      'feat(pavo): remove columns from board storage',
       snapshot.board,
     )
     this.cachedSnapshot = migrated
@@ -1271,6 +1303,7 @@ export class GitBoardRepository {
 
   async ensureSplitSnapshot(snapshot) {
     if (!snapshot || snapshot.format === 'split-current') return snapshot
+    if (!this.config.allowColumnMigration) return snapshot
     if (this.config.autoPull && !this.config.autoPush) return snapshot
     return this.migrateLegacyBoard(snapshot)
   }
@@ -1322,6 +1355,19 @@ export class GitBoardRepository {
         if (this.backgroundSync === pending) this.backgroundSync = undefined
       })
     this.backgroundSync = pending
+  }
+
+  async prepareColumnSettings() {
+    await this.ensureReady()
+    const snapshot = await this.enqueue(async () => {
+      await this.syncRemote({ force: true })
+      const synchronized = await this.readBoard()
+      return synchronized
+        ? this.ensureSplitSnapshot(synchronized)
+        : this.initializeBoard()
+    })
+    this.cachedSnapshot = snapshot
+    return this.decorateOverview(snapshot)
   }
 
   async overview() {

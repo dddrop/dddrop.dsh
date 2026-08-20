@@ -15,6 +15,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import { promisify } from 'node:util'
 
+import { DEFAULT_WORKFLOW } from '../src/board.js'
 import { GitBoardRepository } from '../src/git-store.js'
 import { apply } from '../src/index.js'
 
@@ -247,10 +248,17 @@ test('serves one global Git-backed board and commits every mutation', async () =
     assert.equal(selfDependency.response.status, 400)
     assert.match(selfDependency.payload.error, /must not depend on itself/)
 
+    const detached = await call(route, 'updateWork', {
+      workId: addedCard.id,
+      upstreamWaterLevels: {},
+      expectedRevision: edited.payload.value.revision,
+    })
+    assert.equal(detached.response.status, 200, detached.response.body)
+
     const moved = await call(route, 'moveWork', {
       workId: addedCard.id,
       columnId: 'in-progress',
-      expectedRevision: edited.payload.value.revision,
+      expectedRevision: detached.payload.value.revision,
     })
     assert.equal(moved.response.status, 200, moved.response.body)
 
@@ -271,9 +279,9 @@ test('serves one global Git-backed board and commits every mutation', async () =
     const board = JSON.parse(
       await readFile(path.join(root, 'kanban', 'board.json'), 'utf8'),
     )
-    assert.equal(board.version, 11)
+    assert.equal(board.version, 12)
     assert.deepEqual(board.autoMode, { enabled: false })
-    assert.deepEqual(board.columns[0].allowedTransitions, ['ready'])
+    assert.equal(board.columns, undefined)
     assert.equal(board.projects, undefined)
     assert.equal(board.cards, undefined)
     assert.equal(board.tickets, undefined)
@@ -289,12 +297,14 @@ test('serves one global Git-backed board and commits every mutation', async () =
         'utf8',
       ),
     )
-    assert.equal(welcomeTicket.version, 7)
+    assert.equal(welcomeTicket.version, 8)
     assert.equal(welcomeTicket.id, board.works[0].id)
     assert.equal(welcomeTicket.type, 'goal')
     assert.equal(welcomeTicket.sessionId, '')
     assert.equal(welcomeTicket.description, '')
     assert.deepEqual(welcomeTicket.upstreamWaterLevels, {})
+    assert.deepEqual(welcomeTicket.runUpstreamWaterLevels, {})
+    assert.equal(welcomeTicket.completedAt, null)
     assert.equal(welcomeTicket.key, 'WELCOME')
     assert.equal(welcomeTicket.waterLevel, '0')
     assert.equal(welcomeTicket.title, 'Move this Work to Ready to try the board.')
@@ -305,12 +315,13 @@ test('serves one global Git-backed board and commits every mutation', async () =
       ),
       { code: 'ENOENT' },
     )
-    assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '5')
+    assert.equal(await git(root, 'rev-list', '--count', 'HEAD'), '6')
     assert.deepEqual(
       (await git(root, 'log', '--format=%s')).split('\n'),
       [
         'feat(pavo): remove work',
         'feat(pavo): move work',
+        'feat(pavo): update work',
         'feat(pavo): update work',
         'feat(pavo): add work',
         'feat(pavo): initialize board',
@@ -321,7 +332,10 @@ test('serves one global Git-backed board and commits every mutation', async () =
         .split('\n')
         .filter(Boolean)
         .sort()
-    assert.deepEqual(await changedPaths('HEAD~1'), ['kanban/board.json'])
+    assert.deepEqual(await changedPaths('HEAD~1'), [
+      'kanban/board.json',
+      `kanban/tickets/${addedCard.id}.json`,
+    ])
     assert.deepEqual(await changedPaths('HEAD~2'), [
       `kanban/tickets/${addedCard.id}.json`,
     ])
@@ -938,6 +952,7 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
   const disposers = []
   let createCount = 0
   const promptedMessages = []
+  const liveAgents = new Map()
   let releaseFirstIdle
   const firstIdle = new Promise((resolve) => {
     releaseFirstIdle = resolve
@@ -1004,10 +1019,11 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
           return () => {}
         },
       })
+      liveAgents.set(agent.id, agent)
       return { agent, async dispose() {} }
     },
-    get() {
-      return undefined
+    get(id) {
+      return liveAgents.get(id)
     },
     async resume() {
       throw new Error('resume is not expected')
@@ -1050,6 +1066,7 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
       workspaceId: workspace.id,
       assignee: { kind: 'agent-preset', presetId: 'standard' },
       description: 'Run automatically from Pavo.',
+      waterLevel: '1',
       expectedRevision: initial.payload.value.revision,
     })
     const added = await call(route, 'addWork', {
@@ -1067,9 +1084,24 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
     const secondWorkId = added.payload.value.board.works.find(
       (work) => work.title === 'Run a second Work automatically',
     ).id
+    const dependent = await call(route, 'addWork', {
+      type: 'ongoing',
+      workspaceId: workspace.id,
+      title: 'Run after the upstream Goal is Done',
+      description: 'Run the dependent Goal automatically from Pavo.',
+      assignee: { kind: 'agent-preset', presetId: 'standard' },
+      waterLevel: '0',
+      upstreamWaterLevels: { [workId]: '0' },
+      workflowId: 'root',
+      columnId: 'backlog',
+      expectedRevision: added.payload.value.revision,
+    })
+    const dependentWorkId = dependent.payload.value.board.works.find(
+      (work) => work.title === 'Run after the upstream Goal is Done',
+    ).id
     const enabled = await call(route, 'setAutoMode', {
       enabled: true,
-      expectedRevision: added.payload.value.revision,
+      expectedRevision: dependent.payload.value.revision,
     })
     assert.equal(enabled.response.status, 200, enabled.response.body)
     assert.deepEqual(enabled.payload.value.board.autoMode, { enabled: true })
@@ -1089,6 +1121,12 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
       clearTimeout(timeout)
     }
     assert.equal(createCount, 2)
+    const blocked = await call(route, 'overview')
+    const blockedDependent = blocked.payload.value.board.works.find(
+      (work) => work.id === dependentWorkId,
+    )
+    assert.equal(blockedDependent.columnId, 'backlog')
+    assert.equal(blockedDependent.sessionId, '')
     releaseFirstIdle()
     try {
       await Promise.race([
@@ -1114,6 +1152,111 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
       promptedMessages.map((message) => message.content[0].text).sort(),
       ['Run automatically from Pavo.', 'Run second automatically from Pavo.'].sort(),
     )
+
+    const reviewed = await call(route, 'moveWork', {
+      workId,
+      columnId: 'review',
+      expectedRevision: current.payload.value.revision,
+    })
+    const completed = await call(route, 'moveWork', {
+      workId,
+      columnId: 'done',
+      expectedRevision: reviewed.payload.value.revision,
+    })
+    assert.equal(completed.response.status, 200, completed.response.body)
+
+    let dependentRunning
+    const dependentStartedAt = Date.now()
+    while (Date.now() - dependentStartedAt < 5_000) {
+      const next = await call(route, 'overview')
+      dependentRunning = next.payload.value.board.works.find(
+        (work) => work.id === dependentWorkId,
+      )
+      if (dependentRunning.columnId === 'in-progress' && dependentRunning.sessionId) {
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(dependentRunning.columnId, 'in-progress')
+    assert.notEqual(dependentRunning.sessionId, '')
+    assert.deepEqual(dependentRunning.runUpstreamWaterLevels, { [workId]: '1' })
+    assert.equal(createCount, 3)
+    const dependentCurrent = await call(route, 'overview')
+    const dependentReviewed = await call(route, 'moveWork', {
+      workId: dependentWorkId,
+      columnId: 'review',
+      expectedRevision: dependentCurrent.payload.value.revision,
+    })
+    const dependentDone = await call(route, 'moveWork', {
+      workId: dependentWorkId,
+      columnId: 'done',
+      expectedRevision: dependentReviewed.payload.value.revision,
+    })
+    const acknowledgedDependent = dependentDone.payload.value.board.works.find(
+      (work) => work.id === dependentWorkId,
+    )
+    assert.deepEqual(acknowledgedDependent.upstreamWaterLevels, { [workId]: '1' })
+    assert.deepEqual(acknowledgedDependent.runUpstreamWaterLevels, {})
+
+    const upstreamAdvanced = await call(route, 'updateWork', {
+      workId,
+      waterLevel: '2',
+      expectedRevision: dependentDone.payload.value.revision,
+    })
+    assert.equal(upstreamAdvanced.response.status, 200, upstreamAdvanced.response.body)
+    let ongoingRerun
+    const ongoingStartedAt = Date.now()
+    while (Date.now() - ongoingStartedAt < 5_000) {
+      const next = await call(route, 'overview')
+      ongoingRerun = next.payload.value.board.works.find(
+        (work) => work.id === dependentWorkId,
+      )
+      if (
+        ongoingRerun.columnId === 'in-progress' &&
+        ongoingRerun.runUpstreamWaterLevels[workId] === '2'
+      ) {
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(ongoingRerun.columnId, 'in-progress')
+    assert.equal(ongoingRerun.sessionId, dependentRunning.sessionId)
+    assert.deepEqual(ongoingRerun.runUpstreamWaterLevels, { [workId]: '2' })
+    assert.equal(createCount, 3)
+
+    const beforeManualReopen = await call(route, 'overview')
+    const reopened = await call(route, 'moveWork', {
+      workId,
+      columnId: 'backlog',
+      expectedRevision: beforeManualReopen.payload.value.revision,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const stillBacklog = await call(route, 'overview')
+    assert.equal(
+      stillBacklog.payload.value.board.works.find((work) => work.id === workId)
+        .columnId,
+      'backlog',
+    )
+    assert.equal(createCount, 3)
+
+    const manuallyReadied = await call(route, 'moveWork', {
+      workId,
+      columnId: 'ready',
+      expectedRevision: stillBacklog.payload.value.revision,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(createCount, 3)
+    const rerun = await call(route, 'runWork', {
+      workId,
+      expectedRevision: manuallyReadied.payload.value.revision,
+    })
+    assert.equal(rerun.response.status, 200, rerun.response.body)
+    assert.equal(rerun.payload.value.run.mode, 'created')
+    assert.notEqual(
+      rerun.payload.value.run.sessionId,
+      running.find((work) => work.id === workId).sessionId,
+    )
+    assert.equal(createCount, 4)
   } finally {
     for (const dispose of disposers.reverse()) await dispose()
     await rm(root, { recursive: true, force: true })
@@ -1328,6 +1471,41 @@ test('persists repository settings and restores the active checkout', async () =
       initial.payload.value.repository.repositoryPath,
       firstRepository,
     )
+    assert.equal(initial.payload.value.columns.reviewEnabled, true)
+    assert.equal(initial.payload.value.columns.archiveVisible, false)
+    const blockedColumnRequest = requestFor('saveColumns', {
+      expectedColumnRevision: initial.payload.value.columnRevision,
+      columns: initial.payload.value.columns,
+    })
+    delete blockedColumnRequest.headers['sec-fetch-mode']
+    const blockedColumnResponse = createResponse()
+    await route.handler(blockedColumnRequest, blockedColumnResponse)
+    assert.equal(blockedColumnResponse.status, 403)
+
+    const savedColumns = await call(route, 'saveColumns', {
+      expectedColumnRevision: initial.payload.value.columnRevision,
+      columns: {
+        titles: {
+          backlog: 'Queue',
+          ready: 'Prepared',
+          'in-progress': 'Executing',
+          review: 'Verification',
+          done: 'Complete',
+          archive: 'Cold Storage',
+        },
+        reviewEnabled: false,
+        archiveVisible: true,
+      },
+    })
+    assert.equal(savedColumns.response.status, 200, savedColumns.response.body)
+    assert.equal(savedColumns.payload.value.columns.titles.backlog, 'Queue')
+    assert.equal(savedColumns.payload.value.columns.reviewEnabled, false)
+    assert.equal(savedColumns.payload.value.columns.archiveVisible, true)
+    const staleColumns = await call(route, 'saveColumns', {
+      expectedColumnRevision: initial.payload.value.columnRevision,
+      columns: savedColumns.payload.value.columns,
+    })
+    assert.equal(staleColumns.response.status, 409)
 
     const blockedSettingsRequest = requestFor('saveRepository', {
       expectedRepositoryRevision: initial.payload.value.repositoryRevision,
@@ -1364,8 +1542,11 @@ test('persists repository settings and restores the active checkout', async () =
     await access(secondRepository)
 
     const persisted = JSON.parse(await readFile(settingsPath, 'utf8'))
-    assert.equal(persisted.version, 1)
+    assert.equal(persisted.version, 2)
     assert.equal(persisted.repository.repositoryPath, secondRepository)
+    assert.equal(persisted.columns.titles.archive, 'Cold Storage')
+    assert.equal(persisted.columns.reviewEnabled, false)
+    assert.equal(persisted.columns.archiveVisible, true)
 
     const restartedRoutes = []
     await apply(
@@ -1388,6 +1569,166 @@ test('persists repository settings and restores the active checkout', async () =
       secondRepository,
     )
     assert.equal(restarted.payload.value.pollIntervalMs, 1_500)
+    assert.equal(restarted.payload.value.columns.reviewEnabled, false)
+    assert.equal(restarted.payload.value.columns.archiveVisible, true)
+    assert.deepEqual(
+      restarted.payload.value.board.columns.map((column) => column.title),
+      ['Queue', 'Prepared', 'Executing', 'Complete', 'Cold Storage'],
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('refuses to remove Review while a Work still uses it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-review-settings-'))
+  const routes = []
+  try {
+    await apply(
+      createContext((registered) => routes.push(registered)),
+      {
+        repositoryPath: root,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath: path.join(root, '.pavo-settings.json'),
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    let snapshot = await call(route, 'overview')
+    const workId = snapshot.payload.value.board.works[0].id
+    for (const columnId of ['ready', 'in-progress', 'review']) {
+      snapshot = await call(route, 'moveWork', {
+        workId,
+        columnId,
+        expectedRevision: snapshot.payload.value.revision,
+      })
+    }
+    const settings = await call(route, 'repositorySettings')
+    const rejected = await call(route, 'saveColumns', {
+      expectedColumnRevision: settings.payload.value.columnRevision,
+      columns: {
+        ...settings.payload.value.columns,
+        reviewEnabled: false,
+      },
+    })
+    assert.equal(rejected.response.status, 409)
+    assert.match(rejected.payload.error, /Review cannot be removed/)
+    const unchanged = await call(route, 'repositorySettings')
+    assert.equal(unchanged.payload.value.columns.reviewEnabled, true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('imports recognized legacy Column titles into Pavo Settings before board migration', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-column-migration-'))
+  const repositoryPath = path.join(root, 'repository')
+  const fallbackPath = path.join(root, 'fallback')
+  const settingsPath = path.join(root, 'settings.json')
+  const routes = []
+  try {
+    const repository = new GitBoardRepository({
+      repositoryPath,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    })
+    await repository.overview()
+    const boardPath = path.join(repositoryPath, 'kanban', 'board.json')
+    const legacy = JSON.parse(await readFile(boardPath, 'utf8'))
+    legacy.version = 11
+    legacy.columns = DEFAULT_WORKFLOW.map((column) => ({
+      ...column,
+      title: `Imported ${column.title}`,
+    }))
+    await writeFile(boardPath, `${JSON.stringify(legacy, null, 2)}\n`)
+    await git(repositoryPath, 'add', '--', 'kanban/board.json')
+    await git(repositoryPath, 'commit', '-m', 'test: restore legacy Column storage')
+    await writeFile(
+      settingsPath,
+      `${JSON.stringify({
+        version: 1,
+        repository: {
+          repositoryPath,
+          dataDirectory: 'kanban',
+          branch: 'main',
+          remote: 'origin',
+          autoPull: false,
+          autoPush: false,
+          initializeRepository: true,
+          pollIntervalMs: 3000,
+          pullIntervalMs: 5000,
+        },
+      }, null, 2)}\n`,
+    )
+
+    await apply(
+      createContext((registered) => routes.push(registered)),
+      {
+        repositoryPath: fallbackPath,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath,
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const snapshot = await call(route, 'overview')
+    assert.equal(snapshot.response.status, 200, snapshot.response.body)
+    assert.equal(snapshot.payload.value.board.columns[0].title, 'Imported Backlog')
+    assert.equal(snapshot.payload.value.columns.archiveVisible, false)
+    const migratedSettings = JSON.parse(await readFile(settingsPath, 'utf8'))
+    assert.equal(migratedSettings.version, 2)
+    assert.equal(migratedSettings.columns.titles.done, 'Imported Done')
+    const migratedBoard = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(migratedBoard.version, 12)
+    assert.equal(migratedBoard.columns, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('does not remove legacy Columns before imported settings are durable', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-column-atomicity-'))
+  const repositoryPath = path.join(root, 'repository')
+  const settingsPath = path.join(root, 'settings-directory')
+  const routes = []
+  try {
+    await new GitBoardRepository({
+      repositoryPath,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }).overview()
+    const boardPath = path.join(repositoryPath, 'kanban', 'board.json')
+    const legacy = JSON.parse(await readFile(boardPath, 'utf8'))
+    legacy.version = 11
+    legacy.columns = DEFAULT_WORKFLOW.map((column) => ({
+      ...column,
+      title: `Protected ${column.title}`,
+    }))
+    await writeFile(boardPath, `${JSON.stringify(legacy, null, 2)}\n`)
+    await git(repositoryPath, 'add', '--', 'kanban/board.json')
+    await git(repositoryPath, 'commit', '-m', 'test: protect legacy Column titles')
+    await mkdir(settingsPath)
+
+    await apply(
+      createContext((registered) => routes.push(registered)),
+      {
+        repositoryPath,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath,
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const blocked = await call(route, 'overview')
+    assert.equal(blocked.response.status, 500)
+    const unchanged = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(unchanged.version, 11)
+    assert.equal(unchanged.columns[0].title, 'Protected Backlog')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -1421,6 +1762,63 @@ test('does not block Host startup on an active repository lock', async () => {
     const startupDuration = Date.now() - startedAt
     await rm(lockPath, { force: true })
     assert.equal(startupDuration < 1_000, true)
+  } finally {
+    for (const dispose of disposers.reverse()) await dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('preserves repository overrides when only stored Column settings are invalid', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-invalid-columns-'))
+  const profileRepository = path.join(root, 'profile')
+  const storedRepository = path.join(root, 'stored')
+  const settingsPath = path.join(root, 'repository.json')
+  const routes = []
+  const disposers = []
+  try {
+    await writeFile(
+      settingsPath,
+      `${JSON.stringify({
+        version: 2,
+        repository: {
+          repositoryPath: storedRepository,
+          dataDirectory: 'kanban',
+          branch: 'main',
+          remote: 'origin',
+          autoPull: false,
+          autoPush: false,
+          initializeRepository: true,
+          pollIntervalMs: 3000,
+          pullIntervalMs: 5000,
+        },
+        columns: {
+          titles: { custom: 'Unsupported' },
+          reviewEnabled: true,
+          archiveVisible: false,
+        },
+      }, null, 2)}\n`,
+    )
+    await apply(
+      createContext(
+        (registered) => routes.push(registered),
+        undefined,
+        undefined,
+        undefined,
+        { disposers },
+      ),
+      {
+        repositoryPath: profileRepository,
+        autoPull: false,
+        autoPush: false,
+        initializeRepository: true,
+        settingsPath,
+      },
+    )
+    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
+    const settings = await call(route, 'repositorySettings')
+    assert.equal(settings.payload.value.repository.repositoryPath, storedRepository)
+    assert.equal(settings.payload.value.columns.titles.backlog, 'Backlog')
+    assert.match(settings.payload.value.settingsWarning, /Column settings are invalid/)
   } finally {
     for (const dispose of disposers.reverse()) await dispose()
     await rm(root, { recursive: true, force: true })

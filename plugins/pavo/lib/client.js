@@ -153,6 +153,7 @@ window.__ModuleLoader__.load({
     '.pavo-work-type{display:inline-flex;align-items:center;gap:5px;font-size:9px;font-weight:720;letter-spacing:.06em;text-transform:uppercase;opacity:.58}',
     '.pavo-work-type::before{content:"";width:6px;height:6px;border-radius:2px;background:#2f5fc7}',
     '.pavo-work-type-ongoing::before{border-radius:50%}',
+    '.pavo-work-upstream-changed{color:#b87413;font-weight:700}',
     '.pavo-work-level{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-variant-numeric:tabular-nums;opacity:.56}',
     '.pavo-dependency-state{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:650}',
     '.pavo-dependency-state::before{content:"";width:6px;height:6px;border-radius:50%;background:#76907e}',
@@ -291,6 +292,18 @@ window.__ModuleLoader__.load({
   function dependencyState(current, acknowledged) {
     const comparison = compareWaterLevels(current, acknowledged)
     return comparison > 0 ? 'changed' : comparison < 0 ? 'rollback' : 'synchronized'
+  }
+
+  function hasUnconsumedDoneUpstream(work, works) {
+    return Object.entries(work.upstreamWaterLevels).some(
+      ([upstreamId, acknowledged]) => {
+        const upstream = works.find((candidate) => candidate.id === upstreamId)
+        return (
+          upstream?.columnId === 'done' &&
+          compareWaterLevels(upstream.waterLevel, acknowledged) > 0
+        )
+      },
+    )
   }
 
   function emptyDraft(workspaceId = '', workflowId = ROOT_WORKFLOW_ID) {
@@ -533,9 +546,23 @@ window.__ModuleLoader__.load({
     )
   }
 
-  function workRunBlocker(work, workspaces, agentPresets) {
+  function columnTitle(columns, id, fallback) {
+    return columns?.find((column) => column.id === id)?.title || fallback
+  }
+
+  function workRunBlocker(work, workspaces, agentPresets, works = [], columns = []) {
     if (!work) return 'Choose a Work to run.'
-    if (work.columnId !== 'ready') return 'Move this Work to Ready before running it.'
+    if (work.columnId !== 'ready') {
+      return `Move this Work to ${columnTitle(columns, 'ready', 'Ready')} before running it.`
+    }
+    const worksById = new Map(works.map((candidate) => [candidate.id, candidate]))
+    if (
+      Object.keys(work.upstreamWaterLevels).some(
+        (upstreamId) => worksById.get(upstreamId)?.columnId !== 'done',
+      )
+    ) {
+      return `Every upstream Work must be ${columnTitle(columns, 'done', 'Done')} before this Work can run.`
+    }
     if (!work.workspaceId) return 'Choose a DSH Workspace before running this Work.'
     const workspace = workspaces.find(
       (candidate) => candidate.id === work.workspaceId,
@@ -559,13 +586,14 @@ window.__ModuleLoader__.load({
     return work?.sessionId ? 'Re-run' : 'Run'
   }
 
-  function workRunTitle(work) {
+  function workRunTitle(work, columns = []) {
+    const runningTitle = columnTitle(columns, 'in-progress', 'In Progress')
     if (!work?.sessionId) {
-      return 'Create an Agent Session and move this Work to In Progress.'
+      return `Create an Agent Session and move this Work to ${runningTitle}.`
     }
     return work.type === 'ongoing'
-      ? 'Reuse the linked Agent Session and move this Work to In Progress.'
-      : 'Create a new Agent Session and move this Work to In Progress.'
+      ? `Reuse the linked Agent Session and move this Work to ${runningTitle}.`
+      : `Create a new Agent Session and move this Work to ${runningTitle}.`
   }
 
   function workflowPath(workflows, workflowId) {
@@ -599,6 +627,7 @@ window.__ModuleLoader__.load({
     agentPresets,
     busy,
     compact = false,
+    typeLocked = false,
   }) {
     const update = (name) => (event) =>
       setDraft((current) => ({ ...current, [name]: event.target.value }))
@@ -610,7 +639,7 @@ window.__ModuleLoader__.load({
           {
             className: 'pavo-select',
             value: draft.type,
-            disabled: busy,
+            disabled: busy || typeLocked,
             onChange: update('type'),
           },
           React.createElement('option', { value: 'goal' }, 'Goal Work'),
@@ -700,24 +729,16 @@ window.__ModuleLoader__.load({
 
   function DependencyEditor({ work, works, draft, setDraft, busy }) {
     const candidates = works.filter((candidate) => candidate.id !== work?.id)
+    const dependenciesLocked =
+      work?.columnId === 'in-progress' || work?.columnId === 'review'
     const toggle = (candidate, checked) => {
       setDraft((current) => {
         const upstreamWaterLevels = { ...current.upstreamWaterLevels }
-        if (checked) upstreamWaterLevels[candidate.id] = candidate.waterLevel
+        if (checked) upstreamWaterLevels[candidate.id] = '0'
         else delete upstreamWaterLevels[candidate.id]
         return { ...current, upstreamWaterLevels }
       })
     }
-    const updateLevel = (id, value) => {
-      setDraft((current) => ({
-        ...current,
-        upstreamWaterLevels: {
-          ...current.upstreamWaterLevels,
-          [id]: value,
-        },
-      }))
-    }
-
     return React.createElement(
       'section',
       { className: 'pavo-dependency-editor' },
@@ -728,7 +749,7 @@ window.__ModuleLoader__.load({
         React.createElement(
           'span',
           null,
-          'Select dependencies and record the last upstream WaterLevel this Work has handled.',
+          'Select dependencies. Pavo advances acknowledged WaterLevels only when this Work reaches Done.',
         ),
       ),
       candidates.length === 0
@@ -749,7 +770,7 @@ window.__ModuleLoader__.load({
                 id: `pavo-dependency-${candidate.id}`,
                 type: 'checkbox',
                 checked,
-                disabled: busy,
+                disabled: busy || dependenciesLocked,
                 onChange: (event) => toggle(candidate, event.target.checked),
               }),
               React.createElement(
@@ -770,10 +791,9 @@ window.__ModuleLoader__.load({
                 ? React.createElement('input', {
                     className: 'pavo-input',
                     value: draft.upstreamWaterLevels[candidate.id],
-                    disabled: busy,
-                    inputMode: 'decimal',
+                    disabled: true,
                     'aria-label': `Acknowledged WaterLevel for ${candidate.title}`,
-                    onChange: (event) => updateLevel(candidate.id, event.target.value),
+                    title: 'Pavo updates this value when the Work reaches Done.',
                   })
                 : React.createElement('span', null),
             )
@@ -807,13 +827,16 @@ window.__ModuleLoader__.load({
     if (!mode) return null
     const creating = mode === 'create'
     if (!creating && !work) return null
-    const valid = !stale && isValidDraft(draft)
+    const valid =
+      !stale &&
+      isValidDraft(draft) &&
+      (creating || compareWaterLevels(draft.waterLevel, work.waterLevel) >= 0)
     const workIsSaved = creating || workMatchesDraft(work, draft)
     const column = work
       ? columns.find((candidate) => candidate.id === work.columnId)
       : undefined
     const runBlocker = work
-      ? workRunBlocker(work, workspaces, agentPresets)
+      ? workRunBlocker(work, workspaces, agentPresets, works, columns)
       : 'Save this Work before running it.'
     const heading = creating ? 'Create Work' : draft.title || 'Work details'
     const eyebrow = creating
@@ -882,6 +905,7 @@ window.__ModuleLoader__.load({
               agentPresets,
               busy,
               compact: true,
+              typeLocked: work.completedAt !== null,
             }),
             React.createElement(DependencyEditor, {
               work,
@@ -1007,7 +1031,7 @@ window.__ModuleLoader__.load({
                     busy || stale || !workIsSaved || Boolean(runBlocker),
                   title: !workIsSaved
                     ? 'Save the Work changes before running it.'
-                    : runBlocker || workRunTitle(work),
+                    : runBlocker || workRunTitle(work, columns),
                   onClick: () => onRun(work),
                 },
                 workRunLabel(work),
@@ -1297,13 +1321,13 @@ window.__ModuleLoader__.load({
             return { ...work, upstreamWaterLevels }
           }),
       }))
-    const updateTemplateDependency = (workId, upstreamId, checked, value) =>
+    const updateTemplateDependency = (workId, upstreamId, checked) =>
       setContent((current) => ({
         ...current,
         works: current.works.map((work) => {
           if (work.id !== workId) return work
           const upstreamWaterLevels = { ...work.upstreamWaterLevels }
-          if (checked) upstreamWaterLevels[upstreamId] = value ?? '0'
+          if (checked) upstreamWaterLevels[upstreamId] = '0'
           else delete upstreamWaterLevels[upstreamId]
           return { ...work, upstreamWaterLevels }
         }),
@@ -1489,9 +1513,8 @@ window.__ModuleLoader__.load({
                             checked
                               ? React.createElement('input', {
                                   className: 'pavo-input', value: work.upstreamWaterLevels[candidate.id],
-                                  disabled: busy, inputMode: 'decimal',
-                                  'aria-label': `Acknowledged WaterLevel for ${candidate.title}`,
-                                  onChange: (event) => updateTemplateDependency(work.id, candidate.id, true, event.target.value),
+                                  disabled: true,
+                                  'aria-label': `Initial acknowledged WaterLevel for ${candidate.title}`,
                                 })
                               : React.createElement('span', null),
                           )
@@ -2255,7 +2278,7 @@ window.__ModuleLoader__.load({
       (workflow) => workflow.id === selectedWorkflowId,
     )
     const runBlocker = selected
-      ? workRunBlocker(selected, workspaces, agentPresets)
+      ? workRunBlocker(selected, workspaces, agentPresets, data.works, data.columns)
       : ''
     const visibleWorks = data.works.filter(
       (work) => work.workflowId === currentWorkflowId,
@@ -2286,11 +2309,13 @@ window.__ModuleLoader__.load({
       if (
         !source ||
         !target ||
+        target.columnId === 'in-progress' ||
+        target.columnId === 'review' ||
         Object.prototype.hasOwnProperty.call(target.upstreamWaterLevels, source.id)
       ) return
       onUpdateDependencies(target.id, {
         ...target.upstreamWaterLevels,
-        [source.id]: source.waterLevel,
+        [source.id]: '0',
       })
     }
 
@@ -2449,7 +2474,7 @@ window.__ModuleLoader__.load({
                         type: 'button',
                         className: 'pavo-button pavo-button-primary',
                         disabled: busy,
-                        title: workRunTitle(selected),
+                        title: workRunTitle(selected, data.columns),
                         onClick: () => onRunWork(selected),
                       },
                       workRunLabel(selected),
@@ -2539,22 +2564,11 @@ window.__ModuleLoader__.load({
                               'button',
                               {
                                 type: 'button',
-                                className: 'pavo-button',
-                                disabled: busy || state === 'synchronized',
-                                onClick: () =>
-                                  onUpdateDependencies(selected.id, {
-                                    ...selected.upstreamWaterLevels,
-                                    [work.id]: work.waterLevel,
-                                  }),
-                              },
-                              'Acknowledge current',
-                            ),
-                            React.createElement(
-                              'button',
-                              {
-                                type: 'button',
                                 className: 'pavo-button pavo-button-danger',
-                                disabled: busy,
+                                disabled:
+                                  busy ||
+                                  selected.columnId === 'in-progress' ||
+                                  selected.columnId === 'review',
                                 onClick: () => {
                                   const next = { ...selected.upstreamWaterLevels }
                                   delete next[work.id]
@@ -2887,7 +2901,13 @@ window.__ModuleLoader__.load({
 
     async function runWork(work) {
       if (busyRef.current || !snapshot) return
-      const blocker = workRunBlocker(work, dshWorkspaces, agentPresets)
+      const blocker = workRunBlocker(
+        work,
+        dshWorkspaces,
+        agentPresets,
+        snapshot.board.works,
+        snapshot.board.columns,
+      )
       if (blocker) {
         setError(blocker)
         return
@@ -2906,7 +2926,7 @@ window.__ModuleLoader__.load({
           setSnackbar({
             kind: 'success',
             title: work.sessionId ? 'Work running again' : 'Work running',
-            message: `Session ${next.run.sessionId} ${next.run.mode === 'reused' ? 'reused' : 'created'}. The Work moved to In Progress.`,
+            message: `Session ${next.run.sessionId} ${next.run.mode === 'reused' ? 'reused' : 'created'}. The Work moved to ${columnTitle(next.board.columns, 'in-progress', 'In Progress')}.`,
           })
         }
       } catch (nextError) {
@@ -2945,7 +2965,7 @@ window.__ModuleLoader__.load({
           kind: 'success',
           title: enabled ? 'Automatic mode enabled' : 'Automatic mode disabled',
           message: enabled
-            ? 'Eligible Backlog Works will become Ready, and Agent-assigned Ready Works will start automatically.'
+            ? `Eligible ${columnTitle(snapshot.board.columns, 'backlog', 'Backlog')} Works will become ${columnTitle(snapshot.board.columns, 'ready', 'Ready')}, and Agent-assigned ${columnTitle(snapshot.board.columns, 'ready', 'Ready')} Works will start automatically.`
             : 'Pavo will stop changing Work status and starting Agents automatically.',
         })
       }
@@ -3396,15 +3416,30 @@ window.__ModuleLoader__.load({
     }
 
     const data = snapshot.board
+    const archiveVisible = snapshot.columns?.archiveVisible === true
+    const flowData = archiveVisible
+      ? data
+      : {
+          ...data,
+          works: data.works.filter((work) => work.columnId !== 'archive'),
+        }
     const currentWorkflowPath = workflowPath(data.workflows, currentWorkflowId)
     const draggedCard = data.works.find((card) => card.id === draggedWorkId)
-    const columns = data.columns.map((column) => {
+    const columns = data.columns
+      .filter(
+        (column) =>
+          column.id !== 'archive' || archiveVisible,
+      )
+      .map((column) => {
       const cards = data.works.filter((card) => card.columnId === column.id)
       const cardNodes = cards.map((card) => {
+        const upstreamChanged = hasUnconsumedDoneUpstream(card, data.works)
         const runBlocker = workRunBlocker(
           card,
           dshWorkspaces,
           agentPresets,
+          data.works,
+          data.columns,
         )
         return React.createElement(
           'article',
@@ -3461,6 +3496,15 @@ window.__ModuleLoader__.load({
                   { className: `pavo-work-type pavo-work-type-${card.type}` },
                   card.type === 'goal' ? 'Goal' : 'Ongoing',
                 ),
+                upstreamChanged
+                  ? React.createElement(
+                      'span',
+                      { className: 'pavo-work-upstream-changed' },
+                      card.type === 'goal' && card.completedAt
+                        ? 'Upstream changed · manual Re-run'
+                        : 'Upstream changed',
+                    )
+                  : null,
                 React.createElement(
                   'span',
                   null,
@@ -3485,7 +3529,7 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'pavo-button pavo-button-primary pavo-work-run',
                     disabled: busy,
-                    title: workRunTitle(card),
+                    title: workRunTitle(card, data.columns),
                     onClick: () => void runWork(card),
                   },
                   workRunLabel(card),
@@ -3647,7 +3691,7 @@ window.__ModuleLoader__.load({
             React.createElement(FlowCanvas, {
               key: `${snapshot.repository?.repositoryPath || 'default'}:${snapshot.repository?.dataDirectory || 'kanban'}:${currentWorkflowId}`,
               layoutKey: `${snapshot.repository?.repositoryPath || 'default'}:${snapshot.repository?.dataDirectory || 'kanban'}:${currentWorkflowId}`,
-              data,
+              data: flowData,
               currentWorkflowId,
               selectedNodeId: selectedFlowNodeId,
               onSelectNode: setSelectedFlowNodeId,
@@ -3782,14 +3826,23 @@ window.__ModuleLoader__.load({
   function PavoSettings() {
     const [repositoryInfo, setRepositoryInfo] = React.useState(null)
     const [repositoryDraft, setRepositoryDraft] = React.useState(null)
+    const [columnDraft, setColumnDraft] = React.useState(null)
     const [dshWorkspaces, setDshWorkspaces] = React.useState([])
     const [busy, setBusy] = React.useState(false)
     const [error, setError] = React.useState(null)
     const [saved, setSaved] = React.useState(false)
 
-    const applyRepositoryInfo = React.useCallback((info) => {
+    const applyRepositoryInfo = React.useCallback((info, options = {}) => {
       setRepositoryInfo(info)
-      setRepositoryDraft({ ...info.repository })
+      if (options.repository !== false) {
+        setRepositoryDraft({ ...info.repository })
+      }
+      if (options.columns !== false) {
+        setColumnDraft({
+          ...info.columns,
+          titles: { ...info.columns.titles },
+        })
+      }
     }, [])
 
     const load = React.useCallback(async () => {
@@ -3837,7 +3890,44 @@ window.__ModuleLoader__.load({
         expectedRepositoryRevision: repositoryInfo.repositoryRevision,
       })
         .then((info) => {
-          applyRepositoryInfo(info)
+          applyRepositoryInfo(info, { columns: false })
+          setSaved(true)
+          setError(null)
+        })
+        .catch((nextError) => {
+          setError(nextError instanceof Error ? nextError.message : String(nextError))
+        })
+        .finally(() => setBusy(false))
+    }
+
+    function updateColumnTitle(id, value) {
+      setColumnDraft((current) => ({
+        ...current,
+        titles: { ...current.titles, [id]: value },
+      }))
+      setSaved(false)
+    }
+
+    function updateColumnOption(name, value) {
+      setColumnDraft((current) => ({ ...current, [name]: value }))
+      setSaved(false)
+    }
+
+    function saveColumns() {
+      if (!columnDraft || !repositoryInfo || busy) return
+      setBusy(true)
+      setSaved(false)
+      void request('saveColumns', {
+        columns: {
+          ...columnDraft,
+          titles: Object.fromEntries(
+            Object.entries(columnDraft.titles).map(([id, title]) => [id, title.trim()]),
+          ),
+        },
+        expectedColumnRevision: repositoryInfo.columnRevision,
+      })
+        .then((info) => {
+          applyRepositoryInfo(info, { repository: false })
           setSaved(true)
           setError(null)
         })
@@ -3857,6 +3947,11 @@ window.__ModuleLoader__.load({
       Number(repositoryDraft.pollIntervalMs) >= 1_000 &&
       Number.isSafeInteger(Number(repositoryDraft.pullIntervalMs)) &&
       Number(repositoryDraft.pullIntervalMs) >= 1_000
+    const columnValid =
+      columnDraft &&
+      ['backlog', 'ready', 'in-progress', 'review', 'done', 'archive'].every(
+        (id) => columnDraft.titles[id].trim().length > 0,
+      )
 
     return React.createElement(
       'section',
@@ -3997,7 +4092,7 @@ window.__ModuleLoader__.load({
                   ? React.createElement(
                       'span',
                       { className: 'pavo-settings-saved', role: 'status' },
-                      'Repository settings saved.',
+                      'Pavo settings saved.',
                     )
                   : React.createElement('span'),
                 React.createElement(
@@ -4009,6 +4104,92 @@ window.__ModuleLoader__.load({
                     onClick: saveRepository,
                   },
                   busy ? 'Validating…' : 'Save repository',
+                ),
+              ),
+            ),
+      ),
+      React.createElement(
+        'section',
+        { className: 'pavo-settings-section' },
+        React.createElement('h3', null, 'Columns'),
+        React.createElement(
+          'p',
+          null,
+          'Pavo owns Column IDs, order, and scheduling transitions. Fixed Columns cannot be removed; Review is optional.',
+        ),
+        columnDraft === null
+          ? React.createElement(
+              'div',
+              { className: 'pavo-loading' },
+              'Loading Column settings…',
+            )
+          : React.createElement(
+              React.Fragment,
+              null,
+              React.createElement(
+                'div',
+                { className: 'pavo-settings-grid' },
+                ...[
+                  ['backlog', 'Backlog'],
+                  ['ready', 'Ready'],
+                  ['in-progress', 'In Progress'],
+                  ['review', 'Review'],
+                  ['done', 'Done'],
+                  ['archive', 'Archive'],
+                ].map(([id, label]) =>
+                  field(
+                    `${label}${id === 'review' ? ' (optional)' : ' (fixed)'}`,
+                    React.createElement('input', {
+                      className: 'pavo-input',
+                      value: columnDraft.titles[id],
+                      disabled: busy,
+                      maxLength: 500,
+                      onChange: (event) => updateColumnTitle(id, event.target.value),
+                    }),
+                  ),
+                ),
+              ),
+              React.createElement(
+                'div',
+                { className: 'pavo-checks' },
+                React.createElement(
+                  'label',
+                  { className: 'pavo-check' },
+                  React.createElement('input', {
+                    type: 'checkbox',
+                    checked: columnDraft.reviewEnabled,
+                    disabled: busy,
+                    onChange: (event) =>
+                      updateColumnOption('reviewEnabled', event.target.checked),
+                  }),
+                  React.createElement('span', null, 'Enable the optional Review Column'),
+                ),
+                React.createElement(
+                  'label',
+                  { className: 'pavo-check' },
+                  React.createElement('input', {
+                    type: 'checkbox',
+                    checked: columnDraft.archiveVisible,
+                    disabled: busy,
+                    onChange: (event) =>
+                      updateColumnOption('archiveVisible', event.target.checked),
+                  }),
+                  React.createElement('span', null, 'Show the Archive Column'),
+                ),
+              ),
+              React.createElement(
+                'div',
+                { className: 'pavo-settings-actions' },
+                React.createElement('span'),
+                React.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'pavo-button pavo-button-primary',
+                    disabled: busy || !columnValid,
+                    onClick: saveColumns,
+                  },
+                  busy ? 'Saving…' : 'Save Columns',
                 ),
               ),
             ),

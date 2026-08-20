@@ -2,17 +2,17 @@ export const DEFAULT_WORKFLOW = Object.freeze([
   Object.freeze({
     id: 'backlog',
     title: 'Backlog',
-    allowedTransitions: Object.freeze(['ready']),
+    allowedTransitions: Object.freeze(['ready', 'archive']),
   }),
   Object.freeze({
     id: 'ready',
     title: 'Ready',
-    allowedTransitions: Object.freeze(['backlog', 'in-progress']),
+    allowedTransitions: Object.freeze(['backlog', 'in-progress', 'archive']),
   }),
   Object.freeze({
     id: 'in-progress',
     title: 'In Progress',
-    allowedTransitions: Object.freeze(['ready', 'review']),
+    allowedTransitions: Object.freeze(['ready', 'review', 'done']),
   }),
   Object.freeze({
     id: 'review',
@@ -22,7 +22,12 @@ export const DEFAULT_WORKFLOW = Object.freeze([
   Object.freeze({
     id: 'done',
     title: 'Done',
-    allowedTransitions: Object.freeze(['review', 'backlog']),
+    allowedTransitions: Object.freeze(['backlog', 'archive']),
+  }),
+  Object.freeze({
+    id: 'archive',
+    title: 'Archive',
+    allowedTransitions: Object.freeze(['backlog']),
   }),
 ])
 
@@ -67,6 +72,78 @@ function requireString(value, field, maximumLength, { allowEmpty = false } = {})
     throw new TypeError(`${field} must not exceed ${maximumLength} characters.`)
   }
   return normalized
+}
+
+export const FIXED_COLUMN_IDS = Object.freeze([
+  'backlog',
+  'ready',
+  'in-progress',
+  'done',
+  'archive',
+])
+
+export const COLUMN_IDS = Object.freeze([
+  'backlog',
+  'ready',
+  'in-progress',
+  'review',
+  'done',
+  'archive',
+])
+
+export function normalizeColumnSettings(input = {}) {
+  const settings = requireObject(input, 'Pavo Column settings must be an object.')
+  const titlesInput = settings.titles === undefined
+    ? {}
+    : requireObject(settings.titles, 'Pavo Column titles must be an object.')
+  for (const id of Object.keys(titlesInput)) {
+    if (!COLUMN_IDS.includes(id)) {
+      throw new TypeError(`Unknown Pavo Column title id: ${id}`)
+    }
+  }
+  const defaultTitles = Object.fromEntries(
+    DEFAULT_WORKFLOW.map((column) => [column.id, column.title]),
+  )
+  const titles = Object.fromEntries(
+    COLUMN_IDS.map((id) => [
+      id,
+      requireString(
+        titlesInput[id] ?? defaultTitles[id],
+        `Pavo Column ${id} title`,
+        MAX_TITLE_LENGTH,
+      ),
+    ]),
+  )
+  if (
+    settings.reviewEnabled !== undefined &&
+    typeof settings.reviewEnabled !== 'boolean'
+  ) {
+    throw new TypeError('Pavo Column reviewEnabled must be a boolean.')
+  }
+  if (
+    settings.archiveVisible !== undefined &&
+    typeof settings.archiveVisible !== 'boolean'
+  ) {
+    throw new TypeError('Pavo Column archiveVisible must be a boolean.')
+  }
+  return {
+    titles,
+    reviewEnabled: settings.reviewEnabled ?? true,
+    archiveVisible: settings.archiveVisible ?? false,
+  }
+}
+
+export function columnsFromSettings(input = {}) {
+  const settings = normalizeColumnSettings(input)
+  return DEFAULT_WORKFLOW
+    .filter((column) => column.id !== 'review' || settings.reviewEnabled)
+    .map((column) => ({
+      id: column.id,
+      title: settings.titles[column.id],
+      allowedTransitions: column.allowedTransitions.filter(
+        (target) => target !== 'review' || settings.reviewEnabled,
+      ),
+    }))
 }
 
 export function normalizeAssignee(value) {
@@ -157,6 +234,15 @@ function normalizeTimestamp(value, fallback = new Date(0).toISOString()) {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value))
     ? value
     : fallback
+}
+
+function normalizeOptionalTimestamp(value, fallback = null) {
+  if (value === null) return null
+  if (value === undefined) return fallback
+  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
+    throw new TypeError('Work completedAt must be a valid timestamp or null.')
+  }
+  return value
 }
 
 function normalizeAutoMode(value) {
@@ -671,14 +757,8 @@ export function createDefaultBoard({
 
 export function normalizeBoard(input, { workflow } = {}) {
   const board = requireObject(input, 'The board must be an object.')
-  const boardDefinesTransitions =
-    Array.isArray(board.columns) &&
-    board.columns.every((column) => Array.isArray(column?.allowedTransitions))
-  const configuredWorkflow =
-    workflow && !boardDefinesTransitions ? normalizeWorkflow(workflow) : undefined
-  const columnInput = boardDefinesTransitions
-    ? board.columns
-    : configuredWorkflow ?? board.columns
+  const configuredWorkflow = workflow ? normalizeWorkflow(workflow) : undefined
+  const columnInput = configuredWorkflow ?? board.columns
   const fallbackTimestamp = board.works?.[0]?.createdAt ?? board.cards?.[0]?.createdAt
   const workflows = normalizeWorkflows(board.workflows, fallbackTimestamp)
   const workflowIds = new Set(workflows.map((container) => container.id))
@@ -740,14 +820,49 @@ export function normalizeBoard(input, { workflow } = {}) {
       throw new TypeError(`Work ${id} references an unknown column: ${columnId}`)
     }
     const createdAt = normalizeTimestamp(work.createdAt)
+    const updatedAt = normalizeTimestamp(work.updatedAt, createdAt)
+    const runUpstreamWaterLevels = normalizeUpstreamWaterLevels(
+      work.runUpstreamWaterLevels,
+      workIds,
+      id,
+    )
+    for (const upstreamId of Object.keys(runUpstreamWaterLevels)) {
+      if (!Object.hasOwn(fields.upstreamWaterLevels, upstreamId)) {
+        throw new TypeError(
+          `Work ${id} run snapshot references a non-dependency Work: ${upstreamId}`,
+        )
+      }
+    }
     return {
       id,
       ...fields,
+      runUpstreamWaterLevels,
+      completedAt: normalizeOptionalTimestamp(
+        work.completedAt,
+        columnId === 'done' ||
+          (fields.type === 'goal' &&
+            Boolean(fields.sessionId) &&
+            columnId !== 'in-progress' &&
+            columnId !== 'review')
+          ? updatedAt
+          : null,
+      ),
       columnId,
       createdAt,
-      updatedAt: normalizeTimestamp(work.updatedAt, createdAt),
+      updatedAt,
     }
   })
+
+  const worksById = new Map(works.map((work) => [work.id, work]))
+  for (const work of works) {
+    for (const upstreamId of Object.keys(work.upstreamWaterLevels)) {
+      if (worksById.get(upstreamId)?.columnId === 'archive') {
+        throw new TypeError(
+          `Work ${work.id} cannot depend on archived Work ${upstreamId}.`,
+        )
+      }
+    }
+  }
 
   const sortedColumns = columns.sort((left, right) => left.order - right.order)
   const templates = normalizeTemplates(board.templates, sortedColumns)
@@ -1071,6 +1186,14 @@ export function addWork(boardInput, input, { workflow } = {}) {
     workflowIds: new Set(board.workflows.map((container) => container.id)),
     workId: id,
   })
+  fields.upstreamWaterLevels = Object.fromEntries(
+    Object.keys(fields.upstreamWaterLevels).map((upstreamId) => [upstreamId, '0']),
+  )
+  for (const upstreamId of Object.keys(fields.upstreamWaterLevels)) {
+    if (board.works.find((work) => work.id === upstreamId)?.columnId === 'archive') {
+      throw new TypeError(`Work ${id} cannot depend on archived Work ${upstreamId}.`)
+    }
+  }
   const requestedColumnId = input?.columnId
   const requestedColumn = board.columns.find(
     (candidate) => candidate.id === requestedColumnId,
@@ -1086,6 +1209,8 @@ export function addWork(boardInput, input, { workflow } = {}) {
   board.works.push({
     id,
     ...fields,
+    runUpstreamWaterLevels: {},
+    completedAt: column.id === 'done' ? createdAt : null,
     columnId: column.id,
     createdAt,
     updatedAt: createdAt,
@@ -1109,6 +1234,38 @@ export function updateWork(boardInput, input, { workflow } = {}) {
     workflowIds: new Set(board.workflows.map((container) => container.id)),
     workId,
   })
+  for (const upstreamId of Object.keys(fields.upstreamWaterLevels)) {
+    if (board.works.find((candidate) => candidate.id === upstreamId)?.columnId === 'archive') {
+      throw new TypeError(`Work ${workId} cannot depend on archived Work ${upstreamId}.`)
+    }
+  }
+  const dependenciesChanged = !sameStringMap(
+    work.upstreamWaterLevels,
+    fields.upstreamWaterLevels,
+  )
+  if (
+    dependenciesChanged &&
+    (work.columnId === 'in-progress' || work.columnId === 'review')
+  ) {
+    throw new TypeError('Work dependencies cannot change during an active run.')
+  }
+  for (const [upstreamId, waterLevel] of Object.entries(fields.upstreamWaterLevels)) {
+    if (Object.hasOwn(work.upstreamWaterLevels, upstreamId)) {
+      if (waterLevel !== work.upstreamWaterLevels[upstreamId]) {
+        throw new TypeError(
+          'Acknowledged upstream WaterLevels advance only when the Work reaches Done.',
+        )
+      }
+    } else if (waterLevel !== '0') {
+      throw new TypeError('A new upstream dependency must start at WaterLevel 0.')
+    }
+  }
+  if (work.completedAt !== null && fields.type !== work.type) {
+    throw new TypeError('A completed Work cannot change its type.')
+  }
+  if (compareWaterLevels(fields.waterLevel, work.waterLevel) < 0) {
+    throw new TypeError('Work waterLevel must not decrease.')
+  }
   const unchanged = Object.entries(fields).every(([field, value]) =>
     field === 'upstreamWaterLevels'
       ? sameStringMap(work[field], value)
@@ -1118,6 +1275,11 @@ export function updateWork(boardInput, input, { workflow } = {}) {
     throw new TypeError(`Work ${workId} already has those values.`)
   }
   Object.assign(work, fields)
+  work.runUpstreamWaterLevels = Object.fromEntries(
+    Object.entries(work.runUpstreamWaterLevels).filter(([upstreamId]) =>
+      Object.hasOwn(work.upstreamWaterLevels, upstreamId),
+    ),
+  )
   work.updatedAt = normalizeTimestamp(input?.updatedAt, new Date().toISOString())
   return board
 }
@@ -1202,15 +1364,30 @@ export function removeWorkflow(boardInput, input, { workflow } = {}) {
   return board
 }
 
-function dependenciesAreCurrent(worksById, work) {
-  return Object.entries(work.upstreamWaterLevels).every(
+function dependenciesAreDone(worksById, work) {
+  return Object.keys(work.upstreamWaterLevels).every(
+    (upstreamId) => worksById.get(upstreamId)?.columnId === 'done',
+  )
+}
+
+function hasUnconsumedDoneDependency(worksById, work) {
+  return Object.entries(work.upstreamWaterLevels).some(
     ([upstreamId, acknowledgedWaterLevel]) => {
       const upstream = worksById.get(upstreamId)
       return (
-        upstream !== undefined &&
-        compareWaterLevels(upstream.waterLevel, acknowledgedWaterLevel) <= 0
+        upstream?.columnId === 'done' &&
+        compareWaterLevels(upstream.waterLevel, acknowledgedWaterLevel) > 0
       )
     },
+  )
+}
+
+function snapshotUpstreamWaterLevels(worksById, work) {
+  return Object.fromEntries(
+    Object.keys(work.upstreamWaterLevels).map((upstreamId) => [
+      upstreamId,
+      worksById.get(upstreamId).waterLevel,
+    ]),
   )
 }
 
@@ -1238,19 +1415,21 @@ export function reconcileAutoMode(boardInput, { now, workflow } = {}) {
   const worksById = new Map(board.works.map((work) => [work.id, work]))
 
   board.works = board.works.map((work) => {
-    const dependenciesCurrent = dependenciesAreCurrent(worksById, work)
+    const dependenciesDone = dependenciesAreDone(worksById, work)
     const assigned =
       work.assignee.kind === 'human' || work.assignee.kind === 'agent-preset'
+    const completedGoal = work.type === 'goal' && work.completedAt !== null
     const ready =
       work.columnId === 'backlog' &&
+      !completedGoal &&
       Boolean(work.workspaceId) &&
       assigned &&
-      dependenciesCurrent &&
+      dependenciesDone &&
       transitionIsAllowed(board, 'backlog', 'ready')
     const staleOngoing =
       work.columnId === 'done' &&
       work.type === 'ongoing' &&
-      !dependenciesCurrent &&
+      hasUnconsumedDoneDependency(worksById, work) &&
       transitionIsAllowed(board, 'done', 'backlog')
     if (!ready && !staleOngoing) return work
     return {
@@ -1284,6 +1463,18 @@ export function moveWork(boardInput, input, { workflow } = {}) {
   if (work.columnId === columnId) {
     throw new TypeError(`Work ${workId} is already in ${columnId}.`)
   }
+  if (
+    columnId === 'archive' &&
+    board.works.some(
+      (candidate) =>
+        candidate.id !== workId &&
+        Object.hasOwn(candidate.upstreamWaterLevels, workId),
+    )
+  ) {
+    throw new TypeError(
+      `Work ${workId} cannot be archived while another Work depends on it.`,
+    )
+  }
 
   const source = rules.find((column) => column.id === work.columnId)
   if (!source?.allowedTransitions.includes(columnId)) {
@@ -1292,7 +1483,34 @@ export function moveWork(boardInput, input, { workflow } = {}) {
     )
   }
 
+  const updatedAt = normalizeTimestamp(input?.updatedAt, new Date().toISOString())
+  const worksById = new Map(board.works.map((candidate) => [candidate.id, candidate]))
+  if (columnId === 'in-progress') {
+    if (
+      work.type === 'goal' &&
+      work.completedAt !== null &&
+      input?.allowCompletedGoalStart !== true
+    ) {
+      throw new TypeError('A completed Goal Work can only be started by an explicit Re-run.')
+    }
+    if (!dependenciesAreDone(worksById, work)) {
+      throw new TypeError(`Work ${workId} must wait until every upstream Work is Done.`)
+    }
+    work.runUpstreamWaterLevels = snapshotUpstreamWaterLevels(worksById, work)
+  } else if (columnId === 'done') {
+    work.upstreamWaterLevels = Object.fromEntries(
+      Object.entries(work.upstreamWaterLevels).map(([upstreamId, acknowledged]) => [
+        upstreamId,
+        work.runUpstreamWaterLevels[upstreamId] ?? acknowledged,
+      ]),
+    )
+    work.runUpstreamWaterLevels = {}
+    work.completedAt = updatedAt
+  } else if (columnId === 'backlog' || columnId === 'ready') {
+    work.runUpstreamWaterLevels = {}
+  }
   work.columnId = columnId
+  work.updatedAt = updatedAt
   return board
 }
 
@@ -1311,7 +1529,12 @@ export function startWork(boardInput, input, { workflow } = {}) {
   }
   const started = moveWork(
     board,
-    { workId, columnId: 'in-progress' },
+    {
+      workId,
+      columnId: 'in-progress',
+      updatedAt: input?.updatedAt,
+      allowCompletedGoalStart: true,
+    },
     { workflow },
   )
   const running = started.works.find((candidate) => candidate.id === workId)

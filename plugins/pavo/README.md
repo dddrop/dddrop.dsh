@@ -7,22 +7,25 @@ Pavo is a Git-backed Work board and dependency canvas for the DeepSeek Harness W
 - Adds one `Pavo` conversation tab with `Flow Canvas` as the initial default and the Kanban `Board` as a secondary view, then remembers the selected view across conversation-tab switches and page reloads.
 - Opens Flow Canvas at the fixed `Root Workflow`, supports nested Workflow containers, and uses breadcrumbs to navigate the hierarchy.
 - Allows users and Agents to create Works and Workflows. Every Work belongs to exactly one Workflow; every non-root Workflow belongs to exactly one parent Workflow.
-- Preserves the Kanban status columns, drag-and-drop movement rules, optimistic updates, polling, and Git synchronization behavior.
+- Owns the stable Kanban Column IDs, order, and scheduling transitions in source while preserving drag-and-drop movement, optimistic updates, polling, and Git synchronization behavior.
 - Manages two Work types:
   - `goal`: finite Work with a concrete completion target.
   - `ongoing`: continuously maintained Work.
 - Uses each Work's `Description` directly as the Prompt an Agent reads. Pavo does not interpret the Description or require a fixed result protocol.
-- Stores dependency relationships and acknowledged upstream versions in each downstream Work's `upstreamWaterLevels` dictionary.
-- Allows directed cycles and bidirectional dependencies without topological scheduling, WaterLevel propagation, loop termination, or automatic acknowledgement.
-- Provides a persisted board-level automatic mode that promotes eligible Backlog Works to Ready, starts Ready Agent-assigned Works, and returns stale-dependency Done Ongoing Works to Backlog.
-- Retains explicit user-triggered `Run` and `Re-run` actions; Goal re-runs create a new Session, while Ongoing re-runs preserve context by reusing their linked Session.
+- Stores dependency relationships and successfully consumed upstream versions in each downstream Work's `upstreamWaterLevels` dictionary.
+- Captures the current upstream WaterLevels in `runUpstreamWaterLevels` when execution starts and acknowledges only that snapshot when the Work reaches Done.
+- Allows directed cycles and bidirectional dependencies without topological sorting, WaterLevel propagation, or inferred completion.
+- Provides a persisted board-level automatic mode that waits for every upstream Work to be Done, promotes eligible Backlog Works to Ready, starts Ready Agent-assigned Works, and reactivates stale Done Ongoing Works.
+- Retains explicit user-triggered `Run` and `Re-run` actions; a completed Goal can only be re-run explicitly and receives a new Session, while Ongoing re-runs preserve context by reusing their linked Session.
 - Uses one global board shared by every DSH workspace and session.
 - Creates one semantic Git commit for every Work, Workflow, or Template mutation.
 - Provides a shared Git-backed Template Library for reusable Work records and complete nested Workflow subtrees.
 - Uses process-monotonic UUIDv7 IDs as immutable Work, Workflow, and Template identities.
-- Adds a `Pavo` Settings page for repository configuration and a read-only view of DSH Workspaces.
+- Adds a `Pavo` Settings page for repository configuration, editable Column titles, optional Review, global Archive visibility, and a read-only view of DSH Workspaces.
 
-The Flow Canvas is a hierarchical dependency view powered by `@xyflow/react`. The fixed Root Workflow is the initial scope and is never rendered as a removable node. Each scope displays its direct Works and child Workflows. Double-click a Workflow to enter it and use the breadcrumb path to return to an ancestor. Workflow nodes have no dependency handles. Drag from an upstream Work's handle to a downstream Work in the same visible scope to add a dependency. Cross-Workflow dependencies remain valid and visible in the Work inspector even when both endpoints are not rendered together. The inspector can acknowledge the upstream Work's current WaterLevel or remove the relationship. Node positions are browser-only exploratory state, namespaced by repository and Workflow; Pavo does not duplicate dependency data outside the downstream Work.
+Pavo always defines `backlog`, `ready`, `in-progress`, `done`, and `archive`; users cannot remove or reorder them. `review` exists by default and may be removed only while no Work or Template uses it. All six display titles are editable. Archive is hidden globally by default, remains available as a Work destination, and can be shown from Pavo Settings. Active Works cannot be archived, and a Work cannot be archived while another Work depends on it.
+
+The Flow Canvas is a hierarchical dependency view powered by `@xyflow/react`. The fixed Root Workflow is the initial scope and is never rendered as a removable node. Each scope displays its direct Works and child Workflows. Double-click a Workflow to enter it and use the breadcrumb path to return to an ancestor. Workflow nodes have no dependency handles. Drag from an upstream Work's handle to a downstream Work in the same visible scope to add a dependency. Cross-Workflow dependencies remain valid and visible in the Work inspector even when both endpoints are not rendered together. The inspector shows current and acknowledged upstream WaterLevels or removes the relationship; acknowledgements advance only when the downstream Work reaches Done. Node positions are browser-only exploratory state, namespaced by repository and Workflow; Pavo does not duplicate dependency data outside the downstream Work.
 
 ## Work model
 
@@ -43,9 +46,14 @@ A normalized Work has this shape:
   },
   "waterLevel": "8",
   "upstreamWaterLevels": {
+    "work-api": "11",
+    "work-review": "5"
+  },
+  "runUpstreamWaterLevels": {
     "work-api": "12",
     "work-review": "5"
   },
+  "completedAt": "2025-12-20T00:00:00.000Z",
   "workflowId": "workflow-release",
   "columnId": "in-progress",
   "createdAt": "2026-01-01T00:00:00.000Z",
@@ -102,20 +110,20 @@ WaterLevels are canonical non-negative decimal strings with arbitrary precision.
 
 The Board toolbar persists `autoMode.enabled` in `board.json`. Automatic mode is off for new and migrated boards until explicitly enabled. While enabled, Pavo repeatedly performs these conservative transitions:
 
-1. A Backlog Work moves to Ready when it has a non-empty `workspaceId`, a Human or Agent Preset Assignee, and no upstream Work whose current WaterLevel is greater than the downstream Work's acknowledged value.
-2. A Ready Work assigned to an Agent Preset starts immediately. Human-assigned Works remain Ready.
-3. A Done `ongoing` Work moves to Backlog when any upstream Work advances beyond its acknowledged WaterLevel. Done Goal Works remain Done.
+1. A Backlog Work moves to Ready when it has a non-empty `workspaceId`, a Human or Agent Preset Assignee, every upstream Work is Done, and it is not a previously completed Goal.
+2. A Ready Work assigned to an Agent Preset starts immediately unless it is a previously completed Goal. Human-assigned Works remain Ready.
+3. A Done `ongoing` Work moves to Backlog when a Done upstream Work advances beyond its acknowledged WaterLevel. Done Goal Works remain Done and display their unconsumed upstream changes for an explicit user-triggered Re-run.
 
-Rollback WaterLevels do not count as new upstream work. Automatic transitions preserve Session linkage, WaterLevels, and acknowledgements, honor the persisted column transition rules, and never infer completion, increment WaterLevels, or acknowledge upstream versions. A failed automatic Agent launch remains Ready and is retried with bounded in-memory backoff after transient failures or relevant Work changes.
+When any Human or Agent Work enters In Progress, Pavo copies every upstream Work's current WaterLevel into `runUpstreamWaterLevels`. Moving that Work to Done copies only the captured values into `upstreamWaterLevels`, clears the active snapshot, and records `completedAt`. An upstream version that arrives during execution therefore remains unconsumed and can trigger a later Ongoing cycle. Failed or cancelled execution never advances the acknowledged gate. Pavo never infers completion or increments a Work's own WaterLevel, and WaterLevels cannot decrease.
 
-Explicit `Run` and `Re-run` remain available when a Work is in Ready, references an available DSH Workspace, and is assigned to an available Agent Preset. Manual and automatic execution share one per-Work single-flight coordinator.
+Explicit `Run` and `Re-run` remain available when a Work is in Ready, every upstream Work is Done, it references an available DSH Workspace, and it is assigned to an available Agent Preset. Manual and automatic execution share one per-Work single-flight coordinator.
 
 The first Run creates an idle top-level Agent Session using the current default model, mounts the selected Preset, attaches the Session to the Workspace, and pins the Session title to the Work title. A linked Work can be moved back to Ready and run again:
 
-- A `goal` Re-run creates a new Session. The Work's `sessionId` changes to the newest Session; earlier Goal Sessions remain available in the DSH Workspace history.
+- A completed `goal` is never automatically reactivated or run. An explicit user Re-run creates a new Session, changes the Work's `sessionId` to the newest Session, and retains earlier Goal Sessions in DSH Workspace history.
 - An `ongoing` Re-run reuses its linked Session. Pavo uses the live Agent when available or resumes the persisted Session after a Host restart. Because the Session's composition is durable, the Work must still reference the same Workspace and Agent Preset.
 
-Pavo commits one optimistic Work claim that records the selected `sessionId` and moves `Ready` to `In Progress`. Only after that Git claim succeeds does Pavo submit the current Work `Description` unchanged as a new user Prompt. Automatic Prompt delivery may wait independently for a reused Session to become idle, so it does not block claims for other Ready Works. Concurrent manual and automatic requests for the same Work share one in-flight operation, and automatic execution failures surface in the board UI.
+Pavo commits one optimistic Work claim that records the selected `sessionId`, captures the upstream input snapshot, and moves `Ready` to `In Progress`. Only after that Git claim succeeds does Pavo submit the current Work `Description` unchanged as a new user Prompt. Automatic Prompt delivery may wait independently for a reused Session to become idle, so it does not block claims for other Ready Works. Concurrent manual and automatic requests for the same Work share one in-flight operation, and automatic execution failures surface in the board UI.
 
 A recorded `sessionId` is durable transcript linkage. `Open Session` selects the current Session from the Work drawer or Flow inspector. Pavo does not move the Work beyond In Progress from Agent output; completion remains an explicit user or Agent mutation.
 
@@ -123,7 +131,7 @@ A recorded `sessionId` is durable transcript linkage. `Open Session` selects the
 
 The Template Library is available from both Board and Flow Canvas. A Work template stores reusable Work content without a destination Workflow or dependencies. A Workflow template stores one complete Workflow subtree, all of its Works, their Workflow membership, and dependencies whose endpoints are both inside the captured subtree. Dependencies that point to Works outside a captured source are explicitly excluded and counted on the template.
 
-Templates may be created from scratch, captured from an existing Work or Workflow, renamed, edited, deleted, and instantiated under an explicit destination Workflow. Instantiation is one optimistic Git mutation. It creates fresh UUIDv7 IDs for every Work and Workflow, remaps parent links and internal dependency keys atomically, and copies acknowledged WaterLevel strings exactly. A normal Workflow template's local root becomes a new child of the selected destination. When the fixed Root Workflow itself is captured, that local root is virtual and maps directly to the destination, so Pavo never creates a duplicate Root container.
+Templates may be created from scratch, captured from an existing Work or Workflow, renamed, edited, deleted, and instantiated under an explicit destination Workflow. Instantiation is one optimistic Git mutation. It creates fresh UUIDv7 IDs for every Work and Workflow, remaps parent links and internal dependency keys atomically, and initializes every new dependency acknowledgement at WaterLevel `0`. A normal Workflow template's local root becomes a new child of the selected destination. When the fixed Root Workflow itself is captured, that local root is virtual and maps directly to the destination, so Pavo never creates a duplicate Root container.
 
 Templates remain passive data. Creating or instantiating one does not itself execute an Agent, infer status, change a WaterLevel, acknowledge an upstream version, or propagate a dependency; enabled automatic mode may subsequently reconcile eligible instantiated Works. Templates retain stable Workspace IDs even when a referenced DSH Workspace is temporarily unavailable or has been removed; column values must still identify configured Pavo columns.
 
@@ -153,16 +161,16 @@ Pavo intentionally keeps the default `dataDirectory` as `kanban` and the existin
     └── ...
 ```
 
-`board.json` storage version 11 contains the board-level `autoMode` switch, columns with their `allowedTransitions`, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). Work documents use version 7 and contain `id`, `type`, `workspaceId`, `sessionId`, optional migration-only `legacyWorkspaceTitle`, `key`, `title`, `description`, structured `assignee`, `waterLevel`, `upstreamWaterLevels`, `workflowId`, and timestamps. DSH Workspace titles are live registry metadata and are not duplicated into canonical Pavo storage. Templates never capture Session IDs.
+`board.json` storage version 12 contains the board-level `autoMode` switch, the flat parent-linked Workflow table, the shared Template Library, and ordered Work placements under `works` (`id`, `columnId`, and `order`). It deliberately does not contain Column definitions. Pavo Settings version 2 stores only editable Column titles, the optional Review switch, and global Archive visibility; IDs, order, required status, and transitions remain source-owned. Work documents use version 8 and contain `id`, `type`, `workspaceId`, `sessionId`, optional migration-only `legacyWorkspaceTitle`, `key`, `title`, `description`, structured `assignee`, `waterLevel`, acknowledged `upstreamWaterLevels`, active `runUpstreamWaterLevels`, nullable `completedAt`, `workflowId`, and timestamps. DSH Workspace titles are live registry metadata and are not duplicated into canonical Pavo storage. Templates never capture Session IDs or lifecycle checkpoints.
 
 The reader remains compatible with:
 
 - Combined legacy `board.json` files with `cards` and `body`.
 - Split board versions 2 and 3 with `tickets` placements.
-- Split board versions 4 through 10 with `works` placements.
-- Ticket versions 1 through 6.
+- Split board versions 4 through 11 with `works` placements.
+- Ticket versions 1 through 7.
 
-Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` becomes `{}`, missing `sessionId` becomes an empty string, and data without Workflow membership is assigned to the synthesized Root Workflow. Boards that do not store transition rules receive the profile's bootstrap rules once during migration, and boards without `autoMode` migrate with automatic mode disabled. Legacy Assignee strings become structured values without being treated as Agent Preset IDs. Non-empty legacy Project names become `legacyWorkspaceTitle` with an empty `workspaceId`; migration deliberately does not guess a DSH Workspace ID from a mutable title. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `feat(pavo): persist automatic mode` when write policy permits it.
+Legacy `body` becomes `description`, missing `type` becomes `goal`, missing `upstreamWaterLevels` or `runUpstreamWaterLevels` becomes `{}`, and missing `sessionId` becomes an empty string. A legacy Work already placed in Done receives its previous `updatedAt` as `completedAt`. A legacy Goal with an existing Session outside In Progress or Review is also conservatively treated as previously completed so an upgrade cannot trigger it automatically; other legacy Works receive `null`. Data without Workflow membership is assigned to the synthesized Root Workflow. Recognized titles and Review presence from a version 11 board are imported into Pavo Settings before Column definitions are removed; legacy transition customization is discarded. Unknown legacy Column IDs stop migration with an actionable error. Boards without `autoMode` migrate with automatic mode disabled. Legacy Assignee strings become structured values without being treated as Agent Preset IDs. Non-empty legacy Project names become `legacyWorkspaceTitle` with an empty `workspaceId`; migration deliberately does not guess a DSH Workspace ID from a mutable title. IDs, placement order, timestamps, WaterLevels, and dependencies are preserved. Old split and combined formats are rewritten once with `feat(pavo): remove columns from board storage` when write policy permits it.
 
 The Host keeps `/_dddrop/kanban` and the browser snapshot's derived `cards` alias for already-loaded legacy clients. Canonical storage and current clients use Works.
 
@@ -203,40 +211,13 @@ Configure bootstrap and recovery defaults in the Web profile Cordis patch:
         initializeRepository: false
         pollIntervalMs: 3000
         pullIntervalMs: 5000
-        columns:
-          - id: backlog
-            title: Backlog
-            allowedTransitions: [ready]
-          - id: ready
-            title: Ready
-            allowedTransitions: [backlog, in-progress]
-          - id: in-progress
-            title: In Progress
-            allowedTransitions: [ready, review]
-          - id: review
-            title: Review
-            allowedTransitions: [in-progress, done]
-          - id: done
-            title: Done
-            allowedTransitions: [review, backlog]
 ```
 
 `repositoryPath` remains a required bootstrap value. `settingsPath` defaults to `$DSH_HOME/pavo/repository.json` or `~/.dsh/pavo/repository.json`. The profile reads `PAVO_REPOSITORY_PATH`, falls back to deprecated `KANBAN_REPOSITORY_PATH`, and then uses `~/Development/dddrop.dsh.data`.
 
-Profile `columns` are bootstrap and legacy-migration defaults only. Current boards persist each column's movement rules directly in `<repositoryPath>/<dataDirectory>/board.json`. For example, a Backlog column that may move to every other default column is stored as:
+Profile-level `columns` configuration is rejected. Open Settings → Pavo to edit the six display titles, enable or remove Review, and show or hide Archive globally. Pavo persists those choices beside the repository settings, not in `board.json`. Required IDs, ordering, and transition rules are not editable.
 
-```json
-{
-  "id": "backlog",
-  "title": "Backlog",
-  "allowedTransitions": ["ready", "in-progress", "review", "done"],
-  "order": 0
-}
-```
-
-Open Settings → Pavo to change the repository path, managed data directory, branch, remote, synchronization flags, and polling intervals. The page also shows the sanitized DSH Workspace roster as read-only metadata; manage those Workspaces from the DSH sidebar. Pavo validates a candidate checkout before persisting it or replacing the active repository. If a saved override is unreadable, Pavo keeps profile defaults available for recovery and reports a warning.
-
-Column IDs are stable persisted identifiers. Renaming a title or changing `allowedTransitions` is safe. Removing or changing an ID requires migrating every Work placement and transition reference first.
+The same page changes the repository path, managed data directory, branch, remote, synchronization flags, and polling intervals. It also shows the sanitized DSH Workspace roster as read-only metadata; manage those Workspaces from the DSH sidebar. Pavo validates a candidate checkout before persisting it or replacing the active repository. If a saved override is unreadable, Pavo keeps profile defaults available for recovery and reports a warning.
 
 ## Works, Workflows, and DSH Workspaces
 

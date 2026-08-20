@@ -2,9 +2,11 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
+import { COLUMN_IDS, normalizeBoard, normalizeColumnSettings } from './board.js'
 import { GitBoardRepository, RepositoryError, normalizeConfig } from './git-store.js'
 
-const SETTINGS_VERSION = 1
+const SETTINGS_VERSION = 2
+const LEGACY_SETTINGS_VERSIONS = Object.freeze([1])
 const REPOSITORY_FIELDS = Object.freeze([
   'repositoryPath',
   'dataDirectory',
@@ -32,10 +34,25 @@ function publicRepositoryConfig(config) {
   return repositoryValues(config)
 }
 
-function revisionOf(config) {
-  return createHash('sha256')
-    .update(JSON.stringify(publicRepositoryConfig(config)))
-    .digest('hex')
+function publicColumnSettings(config) {
+  const settings = normalizeColumnSettings(config.columnSettings)
+  return {
+    titles: { ...settings.titles },
+    reviewEnabled: settings.reviewEnabled,
+    archiveVisible: settings.archiveVisible,
+  }
+}
+
+function revisionOf(value) {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function repositoryRevisionOf(config) {
+  return revisionOf(publicRepositoryConfig(config))
+}
+
+function columnRevisionOf(config) {
+  return revisionOf(publicColumnSettings(config))
 }
 
 async function pathStatus(filePath) {
@@ -45,6 +62,60 @@ async function pathStatus(filePath) {
     if (error?.code === 'ENOENT') return undefined
     throw error
   }
+}
+
+async function readLegacyColumnSettings(config) {
+  const boardPath = path.join(
+    config.repositoryPath,
+    config.dataDirectory,
+    'board.json',
+  )
+  await assertNoSymlinkAncestors(boardPath)
+  const status = await pathStatus(boardPath)
+  if (!status) return undefined
+  if (status.isSymbolicLink() || !status.isFile()) {
+    throw new RepositoryError('The Pavo board path must be a regular file.')
+  }
+
+  let document
+  try {
+    document = JSON.parse(await readFile(boardPath, 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (
+    !Number.isSafeInteger(document?.version) ||
+    document.version >= 12 ||
+    !Array.isArray(document.columns)
+  ) {
+    return undefined
+  }
+
+  const defaults = normalizeColumnSettings(config.columnSettings)
+  const titles = { ...defaults.titles }
+  const ids = new Set()
+  for (const column of document.columns) {
+    if (
+      column === null ||
+      typeof column !== 'object' ||
+      Array.isArray(column) ||
+      typeof column.id !== 'string' ||
+      !COLUMN_IDS.includes(column.id)
+    ) {
+      throw new RepositoryError(
+        'Legacy Pavo Columns contain an unsupported id. Move every Work into a built-in Column before upgrading.',
+      )
+    }
+    ids.add(column.id)
+    if (typeof column.title === 'string' && column.title.trim()) {
+      titles[column.id] = column.title
+    }
+  }
+  return normalizeColumnSettings({
+    titles,
+    reviewEnabled: ids.has('review'),
+    archiveVisible: false,
+  })
 }
 
 async function assertNoSymlinkAncestors(targetPath) {
@@ -81,7 +152,7 @@ async function assertNoSymlinkAncestors(targetPath) {
 async function readStoredConfig(defaults) {
   await assertNoSymlinkAncestors(defaults.settingsPath)
   const status = await pathStatus(defaults.settingsPath)
-  if (!status) return defaults
+  if (!status) return { config: defaults, columnsStored: false }
   if (status.isSymbolicLink() || !status.isFile()) {
     throw new RepositoryError(
       'The Pavo repository settings path must be a regular file.',
@@ -98,22 +169,40 @@ async function readStoredConfig(defaults) {
     document === null ||
     typeof document !== 'object' ||
     Array.isArray(document) ||
-    document.version !== SETTINGS_VERSION ||
+    ![...LEGACY_SETTINGS_VERSIONS, SETTINGS_VERSION].includes(document.version) ||
     document.repository === null ||
     typeof document.repository !== 'object' ||
-    Array.isArray(document.repository)
+    Array.isArray(document.repository) ||
+    (document.version === SETTINGS_VERSION &&
+      (document.columns === null ||
+        typeof document.columns !== 'object' ||
+        Array.isArray(document.columns)))
   ) {
     throw new RepositoryError('The Pavo repository settings file is invalid.')
   }
 
-  return normalizeConfig({
-    ...defaults,
-    ...repositoryValues(document.repository),
-    settingsPath: defaults.settingsPath,
-    columns: defaults.columns,
-    gitAuthorName: defaults.gitAuthorName,
-    gitAuthorEmail: defaults.gitAuthorEmail,
-  })
+  let columnSettings = defaults.columnSettings
+  let warning
+  if (document.version === SETTINGS_VERSION) {
+    try {
+      columnSettings = normalizeColumnSettings(document.columns)
+    } catch {
+      warning =
+        'Stored Pavo Column settings are invalid. Repository settings were preserved and default Columns are active.'
+    }
+  }
+  return {
+    config: normalizeConfig({
+      ...defaults,
+      ...repositoryValues(document.repository),
+      settingsPath: defaults.settingsPath,
+      columnSettings,
+      gitAuthorName: defaults.gitAuthorName,
+      gitAuthorEmail: defaults.gitAuthorEmail,
+    }),
+    columnsStored: document.version === SETTINGS_VERSION && !warning,
+    warning,
+  }
 }
 
 async function writeStoredConfig(config) {
@@ -136,6 +225,7 @@ async function writeStoredConfig(config) {
         {
           version: SETTINGS_VERSION,
           repository: publicRepositoryConfig(config),
+          columns: publicColumnSettings(config),
         },
         null,
         2,
@@ -152,20 +242,35 @@ export class RepositoryController {
   static async create(config) {
     const defaults = normalizeConfig(config)
     let active = defaults
+    let columnsStored = false
     let warning
     try {
-      active = await readStoredConfig(defaults)
-    } catch {
+      const stored = await readStoredConfig(defaults)
+      active = stored.config
+      columnsStored = stored.columnsStored
+      warning = stored.warning
+      if (!columnsStored) {
+        active = normalizeConfig({ ...active, allowColumnMigration: false })
+      }
+    } catch (error) {
+      if (error instanceof RepositoryError && /unsupported id/u.test(error.message)) {
+        throw error
+      }
       warning =
-        'Stored repository settings could not be loaded. Pavo is using its profile defaults.'
+        'Stored Pavo settings could not be loaded. Pavo is using its profile defaults.'
     }
-    return new RepositoryController(defaults, active, warning)
+    if (!columnsStored && active.allowColumnMigration !== false) {
+      active = normalizeConfig({ ...active, allowColumnMigration: false })
+    }
+    return new RepositoryController(defaults, active, warning, !columnsStored)
   }
 
-  constructor(defaults, active, warning) {
+  constructor(defaults, active, warning, columnSettingsPending = false) {
     this.defaults = defaults
     this.repository = new GitBoardRepository(active)
     this.settingsWarning = warning
+    this.columnSettingsPending = columnSettingsPending
+    this.columnSettingsPromise = undefined
     this.operationQueue = Promise.resolve()
     this.mutationListeners = new Set()
   }
@@ -177,12 +282,41 @@ export class RepositoryController {
   describe() {
     return {
       repository: publicRepositoryConfig(this.config),
-      repositoryRevision: revisionOf(this.config),
+      repositoryRevision: repositoryRevisionOf(this.config),
+      columns: publicColumnSettings(this.config),
+      columnRevision: columnRevisionOf(this.config),
       settingsWarning: this.settingsWarning,
     }
   }
 
-  overview() {
+  async settings() {
+    await this.ensureColumnSettings()
+    return this.describe()
+  }
+
+  async ensureColumnSettings() {
+    if (!this.columnSettingsPending) return
+    if (this.columnSettingsPromise) return this.columnSettingsPromise
+    const execute = async () => {
+      await this.repository.prepareColumnSettings()
+      const imported = await readLegacyColumnSettings(this.config)
+      const nextConfig = normalizeConfig({
+        ...this.config,
+        columnSettings: imported ?? this.config.columnSettings,
+        allowColumnMigration: true,
+      })
+      await writeStoredConfig(nextConfig)
+      this.repository = new GitBoardRepository(nextConfig)
+      this.columnSettingsPending = false
+    }
+    this.columnSettingsPromise = execute().finally(() => {
+      this.columnSettingsPromise = undefined
+    })
+    return this.columnSettingsPromise
+  }
+
+  async overview() {
+    await this.ensureColumnSettings()
     return this.repository.overview()
   }
 
@@ -205,7 +339,54 @@ export class RepositoryController {
   }
 
   mutate(options) {
-    const execute = () => this.repository.mutate(options)
+    const execute = async () => {
+      await this.ensureColumnSettings()
+      return this.repository.mutate(options)
+    }
+    const pending = this.operationQueue.then(execute, execute)
+    this.operationQueue = pending.catch(() => {})
+    void pending.then((snapshot) => this.notifyMutation(snapshot), () => {})
+    return pending
+  }
+
+  updateColumns(input, expectedColumnRevision) {
+    const execute = async () => {
+      await this.ensureColumnSettings()
+      if (
+        typeof expectedColumnRevision !== 'string' ||
+        expectedColumnRevision !== columnRevisionOf(this.config)
+      ) {
+        throw new RepositoryError(
+          'The Pavo Column settings changed since they were loaded. Refresh and try again.',
+          409,
+        )
+      }
+
+      const columnSettings = normalizeColumnSettings(input)
+      const nextConfig = normalizeConfig({
+        ...this.config,
+        columnSettings,
+        settingsPath: this.defaults.settingsPath,
+        gitAuthorName: this.defaults.gitAuthorName,
+        gitAuthorEmail: this.defaults.gitAuthorEmail,
+      })
+      const current = await this.repository.overview()
+      try {
+        normalizeBoard(current.board, { workflow: nextConfig.columns })
+      } catch (error) {
+        if (!columnSettings.reviewEnabled) {
+          throw new RepositoryError(
+            'Review cannot be removed while a Work or Template still uses it.',
+            409,
+          )
+        }
+        throw error
+      }
+      await writeStoredConfig(nextConfig)
+      this.repository = new GitBoardRepository(nextConfig)
+      this.settingsWarning = undefined
+      return this.describe()
+    }
     const pending = this.operationQueue.then(execute, execute)
     this.operationQueue = pending.catch(() => {})
     void pending.then((snapshot) => this.notifyMutation(snapshot), () => {})
@@ -214,9 +395,10 @@ export class RepositoryController {
 
   updateRepository(input, expectedRepositoryRevision) {
     const execute = async () => {
+      await this.ensureColumnSettings()
       if (
         typeof expectedRepositoryRevision !== 'string' ||
-        expectedRepositoryRevision !== revisionOf(this.config)
+        expectedRepositoryRevision !== repositoryRevisionOf(this.config)
       ) {
         throw new RepositoryError(
           'The repository settings changed since they were loaded. Refresh and try again.',
@@ -228,7 +410,7 @@ export class RepositoryController {
         ...this.defaults,
         ...repositoryValues(input),
         settingsPath: this.defaults.settingsPath,
-        columns: this.defaults.columns,
+        columnSettings: this.config.columnSettings,
         gitAuthorName: this.defaults.gitAuthorName,
         gitAuthorEmail: this.defaults.gitAuthorEmail,
       })
@@ -246,4 +428,9 @@ export class RepositoryController {
   }
 }
 
-export { publicRepositoryConfig, revisionOf as repositoryRevisionOf }
+export {
+  columnRevisionOf,
+  publicColumnSettings,
+  publicRepositoryConfig,
+  repositoryRevisionOf,
+}
