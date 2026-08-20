@@ -20,11 +20,10 @@ import { promisify } from 'node:util'
 
 import {
   COLUMN_IDS,
+  DEFAULT_WORKFLOW,
   ROOT_WORKFLOW_ID,
-  columnsFromSettings,
   createDefaultBoard,
   normalizeBoard,
-  normalizeColumnSettings,
 } from './board.js'
 import { uuidv7 } from './uuid-v7.js'
 
@@ -34,6 +33,7 @@ const GIT_MAX_BUFFER = 1024 * 1024
 const LOCK_WAIT_MS = 30_000
 const LOCK_RETRY_MS = 50
 const LOCK_STALE_MS = 5 * 60_000
+const NORMALIZED_CONFIG = Symbol('pavo.normalized-config')
 
 export class RepositoryError extends Error {
   constructor(message, status = 500) {
@@ -54,6 +54,52 @@ function requireObject(value, message) {
     throw new TypeError(message)
   }
   return value
+}
+
+function fixedColumnId(value) {
+  if (value === 'review') return 'in-progress'
+  return typeof value === 'string' && !COLUMN_IDS.includes(value)
+    ? 'backlog'
+    : value
+}
+
+function remapTemplateColumnReferences(value) {
+  if (!Array.isArray(value)) return value
+  return value.map((template) => {
+    if (
+      template === null ||
+      typeof template !== 'object' ||
+      Array.isArray(template) ||
+      template.content === null ||
+      typeof template.content !== 'object' ||
+      Array.isArray(template.content)
+    ) {
+      return template
+    }
+    if (template.kind === 'work' && Object.hasOwn(template.content, 'columnId')) {
+      return {
+        ...template,
+        content: {
+          ...template.content,
+          columnId: fixedColumnId(template.content.columnId),
+        },
+      }
+    }
+    if (template.kind === 'workflow' && Array.isArray(template.content.works)) {
+      return {
+        ...template,
+        content: {
+          ...template.content,
+          works: template.content.works.map((work) =>
+            work && typeof work === 'object' && !Array.isArray(work)
+              ? { ...work, columnId: fixedColumnId(work.columnId) }
+              : work,
+          ),
+        },
+      }
+    }
+    return template
+  })
 }
 
 function requireString(value, field, fallback) {
@@ -126,19 +172,19 @@ function normalizeDataDirectory(value) {
 
 export function normalizeConfig(input) {
   const config = requireObject(input, 'The Pavo configuration must be an object.')
-  if (Object.hasOwn(config, 'columns') && !Object.hasOwn(config, 'columnSettings')) {
-    throw new TypeError(
-      'Pavo Columns are source-owned and must be configured through Pavo Settings.',
-    )
+  if (Object.hasOwn(config, 'columnSettings')) {
+    throw new TypeError('Pavo Columns are fixed and cannot be configured.')
+  }
+  if (Object.hasOwn(config, 'columns') && config[NORMALIZED_CONFIG] !== true) {
+    throw new TypeError('Pavo Columns are fixed and cannot be configured.')
   }
   const repositoryPath = requireString(
     config.repositoryPath,
     'repositoryPath',
   )
-  const columnSettings = normalizeColumnSettings(config.columnSettings)
-  const workflow = columnsFromSettings(columnSettings)
 
   return {
+    [NORMALIZED_CONFIG]: true,
     repositoryPath: path.resolve(expandHome(repositoryPath)),
     settingsPath: normalizeSettingsPath(config.settingsPath),
     dataDirectory: normalizeDataDirectory(config.dataDirectory),
@@ -179,9 +225,7 @@ export function normalizeConfig(input) {
       'gitAuthorEmail',
       'pavo@localhost',
     ),
-    columnSettings,
-    columns: workflow,
-    allowColumnMigration: config.allowColumnMigration !== false,
+    columns: DEFAULT_WORKFLOW,
   }
 }
 
@@ -190,6 +234,15 @@ export const Config = {
     version: 1,
     vendor: '@dddrop/dsh-plugin-pavo',
     validate(value) {
+      if (
+        value &&
+        typeof value === 'object' &&
+        (Object.hasOwn(value, 'columns') || Object.hasOwn(value, 'columnSettings'))
+      ) {
+        return {
+          issues: [{ message: 'Pavo Columns are fixed and cannot be configured.' }],
+        }
+      }
       try {
         return { value: normalizeConfig(value) }
       } catch (error) {
@@ -826,20 +879,16 @@ export class GitBoardRepository {
         if (!Array.isArray(document.columns)) {
           throw new TypeError('Legacy board version 11 must define columns.')
         }
-        const supportedColumnIds = new Set(COLUMN_IDS)
-        for (const column of document.columns) {
-          if (!supportedColumnIds.has(column?.id)) {
-            throw new TypeError(
-              `Legacy board references an unsupported Column id: ${column?.id ?? 'unknown'}`,
-            )
-          }
+        for (const [index, column] of document.columns.entries()) {
+          requireString(column?.id, `Legacy Column ${index} id`)
         }
       }
+      const hasStoredColumns = Object.hasOwn(document, 'columns')
       if (
         document.version === BOARD_FORMAT_VERSION &&
         (Object.hasOwn(document, 'projects') ||
           document.templates?.some(templateUsesLegacyProject) ||
-          Object.hasOwn(document, 'columns') ||
+          (hasStoredColumns && !Array.isArray(document.columns)) ||
           document.autoMode === null ||
           typeof document.autoMode !== 'object' ||
           Array.isArray(document.autoMode) ||
@@ -849,6 +898,8 @@ export class GitBoardRepository {
           'Current board storage must use DSH Workspace references, omit Pavo-owned Columns, and define autoMode.',
         )
       }
+      let fixedColumnMigration =
+        document.version === BOARD_FORMAT_VERSION && hasStoredColumns
       const placements = ([4, 5, 6, 7, 8, 9, 10, 11, BOARD_FORMAT_VERSION].includes(document.version)
         ? document.works
         : document.tickets)
@@ -870,14 +921,13 @@ export class GitBoardRepository {
               `Ticket placement ${id} order must be a non-negative safe integer.`,
             )
           }
-          return {
-            id,
-            columnId: requireString(
-              placement.columnId,
-              `Ticket placement ${index} columnId`,
-            ),
-            order: placement.order,
-          }
+          const storedColumnId = requireString(
+            placement.columnId,
+            `Ticket placement ${index} columnId`,
+          )
+          const columnId = fixedColumnId(storedColumnId)
+          if (columnId !== storedColumnId) fixedColumnMigration = true
+          return { id, columnId, order: placement.order }
         })
         .sort((left, right) => left.order - right.order)
       placements.forEach((placement, index) => {
@@ -1014,13 +1064,19 @@ export class GitBoardRepository {
         }
       }
 
+      const fixedTemplates = remapTemplateColumnReferences(document.templates)
+      if (JSON.stringify(fixedTemplates) !== JSON.stringify(document.templates)) {
+        fixedColumnMigration = true
+      }
+      if (fixedColumnMigration) legacySplit = true
+
       const board = normalizeBoard(
         {
           version: 1,
           autoMode: document.autoMode,
           columns: this.config.columns,
           workflows: document.workflows,
-          templates: document.templates,
+          templates: fixedTemplates,
           works,
         },
         { workflow: this.config.columns },
@@ -1303,7 +1359,6 @@ export class GitBoardRepository {
 
   async ensureSplitSnapshot(snapshot) {
     if (!snapshot || snapshot.format === 'split-current') return snapshot
-    if (!this.config.allowColumnMigration) return snapshot
     if (this.config.autoPull && !this.config.autoPush) return snapshot
     return this.migrateLegacyBoard(snapshot)
   }
@@ -1355,19 +1410,6 @@ export class GitBoardRepository {
         if (this.backgroundSync === pending) this.backgroundSync = undefined
       })
     this.backgroundSync = pending
-  }
-
-  async prepareColumnSettings() {
-    await this.ensureReady()
-    const snapshot = await this.enqueue(async () => {
-      await this.syncRemote({ force: true })
-      const synchronized = await this.readBoard()
-      return synchronized
-        ? this.ensureSplitSnapshot(synchronized)
-        : this.initializeBoard()
-    })
-    this.cachedSnapshot = snapshot
-    return this.decorateOverview(snapshot)
   }
 
   async overview() {

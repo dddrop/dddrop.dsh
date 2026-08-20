@@ -215,7 +215,7 @@ test('serves one global Git-backed board and commits every mutation', async () =
       expectedRevision: added.payload.value.revision,
     })
     assert.equal(skippedMove.response.status, 400)
-    assert.match(skippedMove.payload.error, /cannot move/)
+    assert.match(skippedMove.payload.error, /Unknown column/)
 
     const edited = await call(route, 'updateWork', {
       workId: addedCard.id,
@@ -1153,15 +1153,10 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
       ['Run automatically from Pavo.', 'Run second automatically from Pavo.'].sort(),
     )
 
-    const reviewed = await call(route, 'moveWork', {
-      workId,
-      columnId: 'review',
-      expectedRevision: current.payload.value.revision,
-    })
     const completed = await call(route, 'moveWork', {
       workId,
       columnId: 'done',
-      expectedRevision: reviewed.payload.value.revision,
+      expectedRevision: current.payload.value.revision,
     })
     assert.equal(completed.response.status, 200, completed.response.body)
 
@@ -1182,15 +1177,10 @@ test('automatically runs an eligible Agent-assigned Backlog Work', async () => {
     assert.deepEqual(dependentRunning.runUpstreamWaterLevels, { [workId]: '1' })
     assert.equal(createCount, 3)
     const dependentCurrent = await call(route, 'overview')
-    const dependentReviewed = await call(route, 'moveWork', {
-      workId: dependentWorkId,
-      columnId: 'review',
-      expectedRevision: dependentCurrent.payload.value.revision,
-    })
     const dependentDone = await call(route, 'moveWork', {
       workId: dependentWorkId,
       columnId: 'done',
-      expectedRevision: dependentReviewed.payload.value.revision,
+      expectedRevision: dependentCurrent.payload.value.revision,
     })
     const acknowledgedDependent = dependentDone.payload.value.board.works.find(
       (work) => work.id === dependentWorkId,
@@ -1471,41 +1461,34 @@ test('persists repository settings and restores the active checkout', async () =
       initial.payload.value.repository.repositoryPath,
       firstRepository,
     )
-    assert.equal(initial.payload.value.columns.reviewEnabled, true)
-    assert.equal(initial.payload.value.columns.archiveVisible, false)
-    const blockedColumnRequest = requestFor('saveColumns', {
-      expectedColumnRevision: initial.payload.value.columnRevision,
-      columns: initial.payload.value.columns,
+    assert.equal(initial.payload.value.columns, undefined)
+    assert.equal(initial.payload.value.columnRevision, undefined)
+    assert.equal(initial.payload.value.archiveVisible, false)
+    const blockedArchiveRequest = requestFor('saveArchiveVisibility', {
+      archiveVisible: true,
+      expectedArchiveVisibilityRevision:
+        initial.payload.value.archiveVisibilityRevision,
     })
-    delete blockedColumnRequest.headers['sec-fetch-mode']
-    const blockedColumnResponse = createResponse()
-    await route.handler(blockedColumnRequest, blockedColumnResponse)
-    assert.equal(blockedColumnResponse.status, 403)
-
-    const savedColumns = await call(route, 'saveColumns', {
-      expectedColumnRevision: initial.payload.value.columnRevision,
-      columns: {
-        titles: {
-          backlog: 'Queue',
-          ready: 'Prepared',
-          'in-progress': 'Executing',
-          review: 'Verification',
-          done: 'Complete',
-          archive: 'Cold Storage',
-        },
-        reviewEnabled: false,
-        archiveVisible: true,
-      },
+    delete blockedArchiveRequest.headers['sec-fetch-mode']
+    const blockedArchiveResponse = createResponse()
+    await route.handler(blockedArchiveRequest, blockedArchiveResponse)
+    assert.equal(blockedArchiveResponse.status, 403)
+    const savedArchive = await call(route, 'saveArchiveVisibility', {
+      archiveVisible: true,
+      expectedArchiveVisibilityRevision:
+        initial.payload.value.archiveVisibilityRevision,
     })
-    assert.equal(savedColumns.response.status, 200, savedColumns.response.body)
-    assert.equal(savedColumns.payload.value.columns.titles.backlog, 'Queue')
-    assert.equal(savedColumns.payload.value.columns.reviewEnabled, false)
-    assert.equal(savedColumns.payload.value.columns.archiveVisible, true)
-    const staleColumns = await call(route, 'saveColumns', {
-      expectedColumnRevision: initial.payload.value.columnRevision,
-      columns: savedColumns.payload.value.columns,
+    assert.equal(savedArchive.response.status, 200, savedArchive.response.body)
+    assert.equal(savedArchive.payload.value.archiveVisible, true)
+    const staleArchive = await call(route, 'saveArchiveVisibility', {
+      archiveVisible: false,
+      expectedArchiveVisibilityRevision:
+        initial.payload.value.archiveVisibilityRevision,
     })
-    assert.equal(staleColumns.response.status, 409)
+    assert.equal(staleArchive.response.status, 409)
+    const removedColumnEndpoint = await call(route, 'saveColumns', {})
+    assert.equal(removedColumnEndpoint.response.status, 400)
+    assert.match(removedColumnEndpoint.payload.error, /Unknown Pavo method/)
 
     const blockedSettingsRequest = requestFor('saveRepository', {
       expectedRepositoryRevision: initial.payload.value.repositoryRevision,
@@ -1542,11 +1525,10 @@ test('persists repository settings and restores the active checkout', async () =
     await access(secondRepository)
 
     const persisted = JSON.parse(await readFile(settingsPath, 'utf8'))
-    assert.equal(persisted.version, 2)
+    assert.equal(persisted.version, 4)
     assert.equal(persisted.repository.repositoryPath, secondRepository)
-    assert.equal(persisted.columns.titles.archive, 'Cold Storage')
-    assert.equal(persisted.columns.reviewEnabled, false)
-    assert.equal(persisted.columns.archiveVisible, true)
+    assert.equal(persisted.archiveVisible, true)
+    assert.equal(Object.hasOwn(persisted, 'columns'), false)
 
     const restartedRoutes = []
     await apply(
@@ -1569,59 +1551,18 @@ test('persists repository settings and restores the active checkout', async () =
       secondRepository,
     )
     assert.equal(restarted.payload.value.pollIntervalMs, 1_500)
-    assert.equal(restarted.payload.value.columns.reviewEnabled, false)
-    assert.equal(restarted.payload.value.columns.archiveVisible, true)
+    assert.equal(restarted.payload.value.columns, undefined)
+    assert.equal(restarted.payload.value.archiveVisible, true)
     assert.deepEqual(
       restarted.payload.value.board.columns.map((column) => column.title),
-      ['Queue', 'Prepared', 'Executing', 'Complete', 'Cold Storage'],
+      ['Backlog', 'Ready', 'In Progress', 'Done', 'Archive'],
     )
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test('refuses to remove Review while a Work still uses it', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-review-settings-'))
-  const routes = []
-  try {
-    await apply(
-      createContext((registered) => routes.push(registered)),
-      {
-        repositoryPath: root,
-        autoPull: false,
-        autoPush: false,
-        initializeRepository: true,
-        settingsPath: path.join(root, '.pavo-settings.json'),
-      },
-    )
-    const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
-    let snapshot = await call(route, 'overview')
-    const workId = snapshot.payload.value.board.works[0].id
-    for (const columnId of ['ready', 'in-progress', 'review']) {
-      snapshot = await call(route, 'moveWork', {
-        workId,
-        columnId,
-        expectedRevision: snapshot.payload.value.revision,
-      })
-    }
-    const settings = await call(route, 'repositorySettings')
-    const rejected = await call(route, 'saveColumns', {
-      expectedColumnRevision: settings.payload.value.columnRevision,
-      columns: {
-        ...settings.payload.value.columns,
-        reviewEnabled: false,
-      },
-    })
-    assert.equal(rejected.response.status, 409)
-    assert.match(rejected.payload.error, /Review cannot be removed/)
-    const unchanged = await call(route, 'repositorySettings')
-    assert.equal(unchanged.payload.value.columns.reviewEnabled, true)
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-})
-
-test('imports recognized legacy Column titles into Pavo Settings before board migration', async () => {
+test('discards legacy Column customization while preserving repository settings', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-column-migration-'))
   const repositoryPath = path.join(root, 'repository')
   const fallbackPath = path.join(root, 'fallback')
@@ -1648,7 +1589,7 @@ test('imports recognized legacy Column titles into Pavo Settings before board mi
     await writeFile(
       settingsPath,
       `${JSON.stringify({
-        version: 1,
+        version: 2,
         repository: {
           repositoryPath,
           dataDirectory: 'kanban',
@@ -1659,6 +1600,11 @@ test('imports recognized legacy Column titles into Pavo Settings before board mi
           initializeRepository: true,
           pollIntervalMs: 3000,
           pullIntervalMs: 5000,
+        },
+        columns: {
+          titles: {},
+          reviewEnabled: true,
+          archiveVisible: true,
         },
       }, null, 2)}\n`,
     )
@@ -1676,11 +1622,14 @@ test('imports recognized legacy Column titles into Pavo Settings before board mi
     const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
     const snapshot = await call(route, 'overview')
     assert.equal(snapshot.response.status, 200, snapshot.response.body)
-    assert.equal(snapshot.payload.value.board.columns[0].title, 'Imported Backlog')
-    assert.equal(snapshot.payload.value.columns.archiveVisible, false)
+    assert.equal(snapshot.payload.value.board.columns[0].title, 'Backlog')
+    assert.equal(snapshot.payload.value.columns, undefined)
+    assert.equal(snapshot.payload.value.archiveVisible, true)
     const migratedSettings = JSON.parse(await readFile(settingsPath, 'utf8'))
-    assert.equal(migratedSettings.version, 2)
-    assert.equal(migratedSettings.columns.titles.done, 'Imported Done')
+    assert.equal(migratedSettings.version, 4)
+    assert.equal(migratedSettings.archiveVisible, true)
+    assert.equal(Object.hasOwn(migratedSettings, 'columns'), false)
+    assert.equal(migratedSettings.repository.repositoryPath, repositoryPath)
     const migratedBoard = JSON.parse(await readFile(boardPath, 'utf8'))
     assert.equal(migratedBoard.version, 12)
     assert.equal(migratedBoard.columns, undefined)
@@ -1689,7 +1638,7 @@ test('imports recognized legacy Column titles into Pavo Settings before board mi
   }
 })
 
-test('does not remove legacy Columns before imported settings are durable', async () => {
+test('migrates fixed Columns even when repository settings cannot be loaded', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-column-atomicity-'))
   const repositoryPath = path.join(root, 'repository')
   const settingsPath = path.join(root, 'settings-directory')
@@ -1724,11 +1673,13 @@ test('does not remove legacy Columns before imported settings are durable', asyn
       },
     )
     const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
-    const blocked = await call(route, 'overview')
-    assert.equal(blocked.response.status, 500)
-    const unchanged = JSON.parse(await readFile(boardPath, 'utf8'))
-    assert.equal(unchanged.version, 11)
-    assert.equal(unchanged.columns[0].title, 'Protected Backlog')
+    const migrated = await call(route, 'overview')
+    assert.equal(migrated.response.status, 200, migrated.response.body)
+    assert.equal(migrated.payload.value.board.columns[0].title, 'Backlog')
+    assert.match(migrated.payload.value.settingsWarning, /could not be loaded/)
+    const persisted = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(persisted.version, 12)
+    assert.equal(Object.hasOwn(persisted, 'columns'), false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -1768,7 +1719,7 @@ test('does not block Host startup on an active repository lock', async () => {
   }
 })
 
-test('preserves repository overrides when only stored Column settings are invalid', async () => {
+test('drops obsolete Column settings while preserving repository overrides', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-invalid-columns-'))
   const profileRepository = path.join(root, 'profile')
   const storedRepository = path.join(root, 'stored')
@@ -1779,7 +1730,7 @@ test('preserves repository overrides when only stored Column settings are invali
     await writeFile(
       settingsPath,
       `${JSON.stringify({
-        version: 2,
+        version: 3,
         repository: {
           repositoryPath: storedRepository,
           dataDirectory: 'kanban',
@@ -1817,8 +1768,12 @@ test('preserves repository overrides when only stored Column settings are invali
     const route = routes.find((candidate) => candidate.path === '/_dddrop/pavo')
     const settings = await call(route, 'repositorySettings')
     assert.equal(settings.payload.value.repository.repositoryPath, storedRepository)
-    assert.equal(settings.payload.value.columns.titles.backlog, 'Backlog')
-    assert.match(settings.payload.value.settingsWarning, /Column settings are invalid/)
+    assert.equal(settings.payload.value.columns, undefined)
+    assert.equal(settings.payload.value.settingsWarning, undefined)
+    const migrated = JSON.parse(await readFile(settingsPath, 'utf8'))
+    assert.equal(migrated.version, 4)
+    assert.equal(migrated.archiveVisible, false)
+    assert.equal(Object.hasOwn(migrated, 'columns'), false)
   } finally {
     for (const dispose of disposers.reverse()) await dispose()
     await rm(root, { recursive: true, force: true })

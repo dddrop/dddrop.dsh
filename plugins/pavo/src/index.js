@@ -954,9 +954,12 @@ async function dispatch(controller, request, services, runCoordinator) {
         args.repository,
         args.expectedRepositoryRevision,
       )
-    case 'saveColumns':
+    case 'saveArchiveVisibility':
       assertRepositorySettingsRequest(request)
-      return controller.updateColumns(args.columns, args.expectedColumnRevision)
+      return controller.updateArchiveVisibility(
+        args.archiveVisible,
+        args.expectedArchiveVisibilityRevision,
+      )
     case 'add':
     case 'addWork':
       return publicSnapshot(

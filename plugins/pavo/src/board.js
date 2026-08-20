@@ -12,12 +12,7 @@ export const DEFAULT_WORKFLOW = Object.freeze([
   Object.freeze({
     id: 'in-progress',
     title: 'In Progress',
-    allowedTransitions: Object.freeze(['ready', 'review', 'done']),
-  }),
-  Object.freeze({
-    id: 'review',
-    title: 'Review',
-    allowedTransitions: Object.freeze(['in-progress', 'done']),
+    allowedTransitions: Object.freeze(['ready', 'done']),
   }),
   Object.freeze({
     id: 'done',
@@ -74,77 +69,11 @@ function requireString(value, field, maximumLength, { allowEmpty = false } = {})
   return normalized
 }
 
-export const FIXED_COLUMN_IDS = Object.freeze([
-  'backlog',
-  'ready',
-  'in-progress',
-  'done',
-  'archive',
-])
+export const FIXED_COLUMN_IDS = Object.freeze(
+  DEFAULT_WORKFLOW.map((column) => column.id),
+)
 
-export const COLUMN_IDS = Object.freeze([
-  'backlog',
-  'ready',
-  'in-progress',
-  'review',
-  'done',
-  'archive',
-])
-
-export function normalizeColumnSettings(input = {}) {
-  const settings = requireObject(input, 'Pavo Column settings must be an object.')
-  const titlesInput = settings.titles === undefined
-    ? {}
-    : requireObject(settings.titles, 'Pavo Column titles must be an object.')
-  for (const id of Object.keys(titlesInput)) {
-    if (!COLUMN_IDS.includes(id)) {
-      throw new TypeError(`Unknown Pavo Column title id: ${id}`)
-    }
-  }
-  const defaultTitles = Object.fromEntries(
-    DEFAULT_WORKFLOW.map((column) => [column.id, column.title]),
-  )
-  const titles = Object.fromEntries(
-    COLUMN_IDS.map((id) => [
-      id,
-      requireString(
-        titlesInput[id] ?? defaultTitles[id],
-        `Pavo Column ${id} title`,
-        MAX_TITLE_LENGTH,
-      ),
-    ]),
-  )
-  if (
-    settings.reviewEnabled !== undefined &&
-    typeof settings.reviewEnabled !== 'boolean'
-  ) {
-    throw new TypeError('Pavo Column reviewEnabled must be a boolean.')
-  }
-  if (
-    settings.archiveVisible !== undefined &&
-    typeof settings.archiveVisible !== 'boolean'
-  ) {
-    throw new TypeError('Pavo Column archiveVisible must be a boolean.')
-  }
-  return {
-    titles,
-    reviewEnabled: settings.reviewEnabled ?? true,
-    archiveVisible: settings.archiveVisible ?? false,
-  }
-}
-
-export function columnsFromSettings(input = {}) {
-  const settings = normalizeColumnSettings(input)
-  return DEFAULT_WORKFLOW
-    .filter((column) => column.id !== 'review' || settings.reviewEnabled)
-    .map((column) => ({
-      id: column.id,
-      title: settings.titles[column.id],
-      allowedTransitions: column.allowedTransitions.filter(
-        (target) => target !== 'review' || settings.reviewEnabled,
-      ),
-    }))
-}
+export const COLUMN_IDS = FIXED_COLUMN_IDS
 
 export function normalizeAssignee(value) {
   if (value === undefined || value === null) return { kind: 'unassigned' }
@@ -842,8 +771,7 @@ export function normalizeBoard(input, { workflow } = {}) {
         columnId === 'done' ||
           (fields.type === 'goal' &&
             Boolean(fields.sessionId) &&
-            columnId !== 'in-progress' &&
-            columnId !== 'review')
+            columnId !== 'in-progress')
           ? updatedAt
           : null,
       ),
@@ -1245,7 +1173,7 @@ export function updateWork(boardInput, input, { workflow } = {}) {
   )
   if (
     dependenciesChanged &&
-    (work.columnId === 'in-progress' || work.columnId === 'review')
+    work.columnId === 'in-progress'
   ) {
     throw new TypeError('Work dependencies cannot change during an active run.')
   }

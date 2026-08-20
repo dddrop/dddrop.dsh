@@ -696,8 +696,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
 
   function DependencyEditor({ work, works, draft, setDraft, busy }) {
     const candidates = works.filter((candidate) => candidate.id !== work?.id)
-    const dependenciesLocked =
-      work?.columnId === 'in-progress' || work?.columnId === 'review'
+    const dependenciesLocked = work?.columnId === 'in-progress'
     const toggle = (candidate, checked) => {
       setDraft((current) => {
         const upstreamWaterLevels = { ...current.upstreamWaterLevels }
@@ -2277,7 +2276,6 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         !source ||
         !target ||
         target.columnId === 'in-progress' ||
-        target.columnId === 'review' ||
         Object.prototype.hasOwnProperty.call(target.upstreamWaterLevels, source.id)
       ) return
       onUpdateDependencies(target.id, {
@@ -2534,8 +2532,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
                                 className: 'pavo-button pavo-button-danger',
                                 disabled:
                                   busy ||
-                                  selected.columnId === 'in-progress' ||
-                                  selected.columnId === 'review',
+                                  selected.columnId === 'in-progress',
                                 onClick: () => {
                                   const next = { ...selected.upstreamWaterLevels }
                                   delete next[work.id]
@@ -3383,7 +3380,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     }
 
     const data = snapshot.board
-    const archiveVisible = snapshot.columns?.archiveVisible === true
+    const archiveVisible = snapshot.archiveVisible === true
     const flowData = archiveVisible
       ? data
       : {
@@ -3393,10 +3390,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
     const currentWorkflowPath = workflowPath(data.workflows, currentWorkflowId)
     const draggedCard = data.works.find((card) => card.id === draggedWorkId)
     const columns = data.columns
-      .filter(
-        (column) =>
-          column.id !== 'archive' || archiveVisible,
-      )
+      .filter((column) => column.id !== 'archive' || archiveVisible)
       .map((column) => {
       const cards = data.works.filter((card) => card.columnId === column.id)
       const cardNodes = cards.map((card) => {
@@ -3793,22 +3787,19 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
   function PavoSettings() {
     const [repositoryInfo, setRepositoryInfo] = React.useState(null)
     const [repositoryDraft, setRepositoryDraft] = React.useState(null)
-    const [columnDraft, setColumnDraft] = React.useState(null)
+    const [archiveVisibleDraft, setArchiveVisibleDraft] = React.useState(false)
     const [dshWorkspaces, setDshWorkspaces] = React.useState([])
     const [busy, setBusy] = React.useState(false)
     const [error, setError] = React.useState(null)
-    const [saved, setSaved] = React.useState(false)
+    const [savedSection, setSavedSection] = React.useState(null)
 
     const applyRepositoryInfo = React.useCallback((info, options = {}) => {
       setRepositoryInfo(info)
       if (options.repository !== false) {
         setRepositoryDraft({ ...info.repository })
       }
-      if (options.columns !== false) {
-        setColumnDraft({
-          ...info.columns,
-          titles: { ...info.columns.titles },
-        })
+      if (options.archiveVisibility !== false) {
+        setArchiveVisibleDraft(info.archiveVisible === true)
       }
     }, [])
 
@@ -3836,13 +3827,13 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
 
     function updateRepositoryField(name, value) {
       setRepositoryDraft((current) => ({ ...current, [name]: value }))
-      setSaved(false)
+      setSavedSection(null)
     }
 
     function saveRepository() {
       if (!repositoryDraft || !repositoryInfo || busy) return
       setBusy(true)
-      setSaved(false)
+      setSavedSection(null)
       const repository = {
         ...repositoryDraft,
         repositoryPath: repositoryDraft.repositoryPath.trim(),
@@ -3857,8 +3848,8 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         expectedRepositoryRevision: repositoryInfo.repositoryRevision,
       })
         .then((info) => {
-          applyRepositoryInfo(info, { columns: false })
-          setSaved(true)
+          applyRepositoryInfo(info, { archiveVisibility: false })
+          setSavedSection('repository')
           setError(null)
         })
         .catch((nextError) => {
@@ -3867,35 +3858,18 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
         .finally(() => setBusy(false))
     }
 
-    function updateColumnTitle(id, value) {
-      setColumnDraft((current) => ({
-        ...current,
-        titles: { ...current.titles, [id]: value },
-      }))
-      setSaved(false)
-    }
-
-    function updateColumnOption(name, value) {
-      setColumnDraft((current) => ({ ...current, [name]: value }))
-      setSaved(false)
-    }
-
-    function saveColumns() {
-      if (!columnDraft || !repositoryInfo || busy) return
+    function saveArchiveVisibility() {
+      if (!repositoryInfo || busy) return
       setBusy(true)
-      setSaved(false)
-      void request('saveColumns', {
-        columns: {
-          ...columnDraft,
-          titles: Object.fromEntries(
-            Object.entries(columnDraft.titles).map(([id, title]) => [id, title.trim()]),
-          ),
-        },
-        expectedColumnRevision: repositoryInfo.columnRevision,
+      setSavedSection(null)
+      void request('saveArchiveVisibility', {
+        archiveVisible: archiveVisibleDraft,
+        expectedArchiveVisibilityRevision:
+          repositoryInfo.archiveVisibilityRevision,
       })
         .then((info) => {
           applyRepositoryInfo(info, { repository: false })
-          setSaved(true)
+          setSavedSection('archive')
           setError(null)
         })
         .catch((nextError) => {
@@ -3914,12 +3888,6 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       Number(repositoryDraft.pollIntervalMs) >= 1_000 &&
       Number.isSafeInteger(Number(repositoryDraft.pullIntervalMs)) &&
       Number(repositoryDraft.pullIntervalMs) >= 1_000
-    const columnValid =
-      columnDraft &&
-      ['backlog', 'ready', 'in-progress', 'review', 'done', 'archive'].every(
-        (id) => columnDraft.titles[id].trim().length > 0,
-      )
-
     return React.createElement(
       'section',
       { className: 'pavo-settings' },
@@ -4055,7 +4023,7 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
               React.createElement(
                 'div',
                 { className: 'pavo-settings-actions' },
-                saved
+                savedSection === 'repository'
                   ? React.createElement(
                       'span',
                       { className: 'pavo-settings-saved', role: 'status' },
@@ -4078,88 +4046,47 @@ export function createClientPlugin(React, XYFlow, XYFLOW_STYLES) {
       React.createElement(
         'section',
         { className: 'pavo-settings-section' },
-        React.createElement('h3', null, 'Columns'),
+        React.createElement('h3', null, 'Board display'),
         React.createElement(
           'p',
           null,
-          'Pavo owns Column IDs, order, and scheduling transitions. Fixed Columns cannot be removed; Review is optional.',
+          'Archive is a fixed Column and remains available as a Work destination. Choose whether it is visible on the Board and Flow Canvas.',
         ),
-        columnDraft === null
-          ? React.createElement(
-              'div',
-              { className: 'pavo-loading' },
-              'Loading Column settings…',
-            )
-          : React.createElement(
-              React.Fragment,
-              null,
-              React.createElement(
-                'div',
-                { className: 'pavo-settings-grid' },
-                ...[
-                  ['backlog', 'Backlog'],
-                  ['ready', 'Ready'],
-                  ['in-progress', 'In Progress'],
-                  ['review', 'Review'],
-                  ['done', 'Done'],
-                  ['archive', 'Archive'],
-                ].map(([id, label]) =>
-                  field(
-                    `${label}${id === 'review' ? ' (optional)' : ' (fixed)'}`,
-                    React.createElement('input', {
-                      className: 'pavo-input',
-                      value: columnDraft.titles[id],
-                      disabled: busy,
-                      maxLength: 500,
-                      onChange: (event) => updateColumnTitle(id, event.target.value),
-                    }),
-                  ),
-                ),
-              ),
-              React.createElement(
-                'div',
-                { className: 'pavo-checks' },
-                React.createElement(
-                  'label',
-                  { className: 'pavo-check' },
-                  React.createElement('input', {
-                    type: 'checkbox',
-                    checked: columnDraft.reviewEnabled,
-                    disabled: busy,
-                    onChange: (event) =>
-                      updateColumnOption('reviewEnabled', event.target.checked),
-                  }),
-                  React.createElement('span', null, 'Enable the optional Review Column'),
-                ),
-                React.createElement(
-                  'label',
-                  { className: 'pavo-check' },
-                  React.createElement('input', {
-                    type: 'checkbox',
-                    checked: columnDraft.archiveVisible,
-                    disabled: busy,
-                    onChange: (event) =>
-                      updateColumnOption('archiveVisible', event.target.checked),
-                  }),
-                  React.createElement('span', null, 'Show the Archive Column'),
-                ),
-              ),
-              React.createElement(
-                'div',
-                { className: 'pavo-settings-actions' },
-                React.createElement('span'),
-                React.createElement(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'pavo-button pavo-button-primary',
-                    disabled: busy || !columnValid,
-                    onClick: saveColumns,
-                  },
-                  busy ? 'Saving…' : 'Save Columns',
-                ),
-              ),
-            ),
+        React.createElement(
+          'label',
+          { className: 'pavo-check' },
+          React.createElement('input', {
+            type: 'checkbox',
+            checked: archiveVisibleDraft,
+            disabled: busy,
+            onChange: (event) => {
+              setArchiveVisibleDraft(event.target.checked)
+              setSavedSection(null)
+            },
+          }),
+          React.createElement('span', null, 'Show the Archive Column'),
+        ),
+        React.createElement(
+          'div',
+          { className: 'pavo-settings-actions' },
+          savedSection === 'archive'
+            ? React.createElement(
+                'span',
+                { className: 'pavo-settings-saved', role: 'status' },
+                'Archive visibility saved.',
+              )
+            : React.createElement('span'),
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'pavo-button pavo-button-primary',
+              disabled: busy,
+              onClick: saveArchiveVisibility,
+            },
+            busy ? 'Saving…' : 'Save display',
+          ),
+        ),
       ),
       React.createElement(
         'section',

@@ -7,14 +7,12 @@ import {
   addTemplate,
   addWork,
   addWorkflow,
-  columnsFromSettings,
   compareWaterLevels,
   createDefaultBoard,
   instantiateTemplate,
   moveWork,
   normalizeAssignee,
   normalizeBoard,
-  normalizeColumnSettings,
   normalizeWorkflow,
   normalizeWorkspaceReference,
   reconcileAutoMode,
@@ -55,11 +53,11 @@ function workInput(overrides = {}) {
   }
 }
 
-test('creates the six source-owned Columns with a Goal Work', () => {
+test('creates the five source-owned Columns with a Goal Work', () => {
   const board = createBoard()
   assert.deepEqual(
     board.columns.map((column) => column.title),
-    ['Backlog', 'Ready', 'In Progress', 'Review', 'Done', 'Archive'],
+    ['Backlog', 'Ready', 'In Progress', 'Done', 'Archive'],
   )
   assert.equal(board.works[0].workspaceId, '')
   assert.deepEqual(
@@ -78,45 +76,19 @@ test('creates the six source-owned Columns with a Goal Work', () => {
   assert.deepEqual(board.works[0].upstreamWaterLevels, {})
 })
 
-test('derives immutable Column structure from editable Pavo settings', () => {
-  const defaults = normalizeColumnSettings()
-  assert.equal(defaults.reviewEnabled, true)
-  assert.equal(defaults.archiveVisible, false)
-
-  const columns = columnsFromSettings({
-    titles: {
-      backlog: 'Queue',
-      ready: 'Prepared',
-      'in-progress': 'Executing',
-      review: 'Verification',
-      done: 'Complete',
-      archive: 'Cold Storage',
-    },
-    reviewEnabled: false,
-    archiveVisible: true,
-  })
+test('keeps every Column id, name, order, and transition source-owned', () => {
   assert.deepEqual(
-    columns.map(({ id, title }) => ({ id, title })),
+    DEFAULT_WORKFLOW.map(({ id, title }) => ({ id, title })),
     [
-      { id: 'backlog', title: 'Queue' },
-      { id: 'ready', title: 'Prepared' },
-      { id: 'in-progress', title: 'Executing' },
-      { id: 'done', title: 'Complete' },
-      { id: 'archive', title: 'Cold Storage' },
+      { id: 'backlog', title: 'Backlog' },
+      { id: 'ready', title: 'Ready' },
+      { id: 'in-progress', title: 'In Progress' },
+      { id: 'done', title: 'Done' },
+      { id: 'archive', title: 'Archive' },
     ],
   )
-  assert.deepEqual(
-    columns.find((column) => column.id === 'in-progress').allowedTransitions,
-    ['ready', 'done'],
-  )
-  assert.throws(
-    () => normalizeColumnSettings({ titles: { custom: 'Custom' } }),
-    /Unknown Pavo Column title id/,
-  )
-  assert.throws(
-    () => normalizeColumnSettings({ titles: { backlog: '   ' } }),
-    /non-empty string/,
-  )
+  assert.deepEqual(DEFAULT_WORKFLOW[2].allowedTransitions, ['ready', 'done'])
+  assert.ok(DEFAULT_WORKFLOW.every((column) => Object.isFrozen(column)))
 })
 
 test('adds, edits, moves, and removes a Work without mutating inputs', () => {
@@ -161,11 +133,6 @@ test('adds, edits, moves, and removes a Work without mutating inputs', () => {
   )
   upstreamDone = moveWork(
     upstreamDone,
-    { workId: 'welcome-work', columnId: 'review' },
-    { workflow: DEFAULT_WORKFLOW },
-  )
-  upstreamDone = moveWork(
-    upstreamDone,
     { workId: 'welcome-work', columnId: 'done' },
     { workflow: DEFAULT_WORKFLOW },
   )
@@ -184,11 +151,6 @@ test('adds, edits, moves, and removes a Work without mutating inputs', () => {
   )
   let editable = moveWork(
     moved,
-    { workId: 'new-work', columnId: 'review' },
-    { workflow: DEFAULT_WORKFLOW },
-  )
-  editable = moveWork(
-    editable,
     { workId: 'new-work', columnId: 'done' },
     { workflow: DEFAULT_WORKFLOW },
   )
@@ -235,7 +197,7 @@ test('accepts forward references and cyclic Work dependencies', () => {
         description: 'Review the implementation.',
         waterLevel: '6',
         upstreamWaterLevels: { code: '12' },
-        columnId: 'review',
+        columnId: 'in-progress',
       },
     ],
   })
@@ -540,42 +502,6 @@ test('creates, edits, applies, and removes a Work template', () => {
   })
   assert.deepEqual(created.upstreamWaterLevels, {})
   assert.equal(removeTemplate(instantiated, { templateId: 'template-work' }).templates.length, 0)
-})
-
-test('prevents Review removal while Work and Workflow Templates reference it', () => {
-  let board = createBoard()
-  board = moveWork(board, { workId: 'welcome-work', columnId: 'ready' })
-  board = moveWork(board, { workId: 'welcome-work', columnId: 'in-progress' })
-  board = moveWork(board, { workId: 'welcome-work', columnId: 'review' })
-  const workTemplateBoard = addTemplate(board, {
-    id: 'review-work-template',
-    kind: 'work',
-    name: 'Review Work',
-    content: workTemplateContentFromWork(board.works[0]),
-    excludedExternalDependencies: 0,
-    createdAt: fixedTime,
-  })
-  const capturedWorkflow = workflowTemplateContentFromWorkflow(
-    board,
-    ROOT_WORKFLOW_ID,
-  )
-  const workflowTemplateBoard = addTemplate(board, {
-    id: 'review-workflow-template',
-    kind: 'workflow',
-    name: 'Review Workflow',
-    content: capturedWorkflow.content,
-    excludedExternalDependencies: capturedWorkflow.excludedExternalDependencies,
-    createdAt: fixedTime,
-  })
-  const withoutReview = columnsFromSettings({ reviewEnabled: false })
-  assert.throws(
-    () => normalizeBoard(workTemplateBoard, { workflow: withoutReview }),
-    /unknown column: review/,
-  )
-  assert.throws(
-    () => normalizeBoard(workflowTemplateBoard, { workflow: withoutReview }),
-    /unknown column: review/,
-  )
 })
 
 test('captures and instantiates nested Workflow templates with remapped cycles', () => {
@@ -939,11 +865,6 @@ test('captures upstream WaterLevels at start and acknowledges them only on Done'
   })
   board = moveWork(board, {
     workId: 'consumer',
-    columnId: 'review',
-    updatedAt: '2026-01-04T12:00:00.000Z',
-  })
-  board = moveWork(board, {
-    workId: 'consumer',
     columnId: 'done',
     updatedAt: '2026-01-05T00:00:00.000Z',
   })
@@ -1052,7 +973,7 @@ test('skips automatic moves forbidden by column transition rules', () => {
   const workflow = DEFAULT_WORKFLOW.map((column) => ({
     ...column,
     allowedTransitions:
-      column.id === 'done' ? ['review'] : [...column.allowedTransitions],
+      column.id === 'done' ? ['archive'] : [...column.allowedTransitions],
   }))
   let board = createDefaultBoard({ id: 'upstream', workflow })
   board = updateWork(board, {
@@ -1200,10 +1121,10 @@ test('declares a statically configured Host plugin', () => {
     autoPush: false,
   })
   assert.equal(valid.issues, undefined)
-  assert.equal(valid.value.columns.length, 6)
+  assert.equal(valid.value.columns.length, 5)
   const legacyColumns = Config['~standard'].validate({
     repositoryPath: '/tmp/pavo-data',
     columns: DEFAULT_WORKFLOW,
   })
-  assert.match(legacyColumns.issues[0].message, /source-owned/)
+  assert.match(legacyColumns.issues[0].message, /fixed and cannot be configured/)
 })

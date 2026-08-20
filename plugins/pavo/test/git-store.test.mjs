@@ -32,6 +32,7 @@ import {
   GitBoardRepository,
   RepositoryError,
   StaleRevisionError,
+  normalizeConfig,
 } from '../src/git-store.js'
 
 const execFileAsync = promisify(execFile)
@@ -60,6 +61,15 @@ function addConfiguredWork(board, input, workflow) {
     { workflow },
   )
 }
+
+test('rejects Column configuration through the direct config API', () => {
+  assert.throws(
+    () => normalizeConfig({ repositoryPath: '/tmp/pavo', columns: DEFAULT_WORKFLOW }),
+    /fixed and cannot be configured/,
+  )
+  const normalized = normalizeConfig({ repositoryPath: '/tmp/pavo' })
+  assert.equal(normalizeConfig(normalized).columns, DEFAULT_WORKFLOW)
+})
 
 test('pulls remote changes, rejects stale revisions, and pushes mutations', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-kanban-remote-'))
@@ -774,7 +784,7 @@ test('removes legacy board-owned Column definitions during migration', async () 
   }
 })
 
-test('rejects unsupported legacy Column ids instead of remapping Works', async () => {
+test('moves legacy custom Column references to Backlog during migration', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-legacy-column-'))
   try {
     const config = {
@@ -795,10 +805,71 @@ test('rejects unsupported legacy Column ids instead of remapping Works', async (
     await writeFile(boardPath, `${JSON.stringify(legacy, null, 2)}\n`)
     await git(root, 'add', '--', 'kanban/board.json')
     await git(root, 'commit', '-m', 'test: add unsupported legacy Column')
-    await assert.rejects(
-      new GitBoardRepository(config).overview(),
-      /unsupported Column id: custom/,
-    )
+    const migrated = await new GitBoardRepository(config).overview()
+    assert.equal(migrated.board.works[0].columnId, 'backlog')
+    const persisted = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(persisted.version, 12)
+    assert.equal(Object.hasOwn(persisted, 'columns'), false)
+    assert.equal(persisted.works[0].columnId, 'backlog')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('repairs preview-era custom Column references in current storage', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-current-custom-column-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    await new GitBoardRepository(config).overview()
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const document = JSON.parse(await readFile(boardPath, 'utf8'))
+    document.columns = [
+      ...DEFAULT_WORKFLOW,
+      { id: 'review', title: 'Review', allowedTransitions: ['in-progress', 'done'] },
+      { id: 'preview-custom', title: 'Preview Custom', allowedTransitions: [] },
+    ]
+    document.works[0].columnId = 'review'
+    await writeFile(boardPath, `${JSON.stringify(document, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json')
+    await git(root, 'commit', '-m', 'test: add preview custom Column reference')
+
+    const repaired = await new GitBoardRepository(config).overview()
+    assert.equal(repaired.board.works[0].columnId, 'in-progress')
+    const persisted = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(persisted.works[0].columnId, 'in-progress')
+    assert.equal(Object.hasOwn(persisted, 'columns'), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('moves removed Review references in canonical storage to In Progress', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dddrop-pavo-current-review-'))
+  try {
+    const config = {
+      repositoryPath: root,
+      autoPull: false,
+      autoPush: false,
+      initializeRepository: true,
+    }
+    await new GitBoardRepository(config).overview()
+    const boardPath = path.join(root, 'kanban', 'board.json')
+    const document = JSON.parse(await readFile(boardPath, 'utf8'))
+    document.works[0].columnId = 'review'
+    await writeFile(boardPath, `${JSON.stringify(document, null, 2)}\n`)
+    await git(root, 'add', '--', 'kanban/board.json')
+    await git(root, 'commit', '-m', 'test: add removed Review reference')
+
+    const migrated = await new GitBoardRepository(config).overview()
+    assert.equal(migrated.board.works[0].columnId, 'in-progress')
+    const persisted = JSON.parse(await readFile(boardPath, 'utf8'))
+    assert.equal(persisted.works[0].columnId, 'in-progress')
+    assert.equal(Object.hasOwn(persisted, 'columns'), false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -837,9 +908,11 @@ test('rejects legacy Project fields in current Workspace storage', async () => {
     await writeFile(boardPath, `${JSON.stringify(boardDocument, null, 2)}\n`)
     await git(root, 'add', '--', 'kanban/board.json')
     await git(root, 'commit', '-m', 'test: add current board-owned Columns')
-    await assert.rejects(
-      new GitBoardRepository(config).overview(),
-      /omit Pavo-owned Columns/,
+    const columnsMigrated = await new GitBoardRepository(config).overview()
+    assert.equal(columnsMigrated.board.columns.length, 5)
+    assert.equal(
+      Object.hasOwn(JSON.parse(await readFile(boardPath, 'utf8')), 'columns'),
+      false,
     )
 
     delete boardDocument.columns
